@@ -1,5 +1,14 @@
 import React, { useMemo, useState, useEffect } from "react";
-import { Crown, User2, Gamepad2, Users2, History, Wallet, Info } from "lucide-react";
+import { Crown, User2, Gamepad2, Users2, History, Info } from "lucide-react";
+
+// === API (наш сервер) ===
+import {
+  initUser,
+  getBalance as apiGetBalance,
+  getHistory as apiGetHistory,
+  bet as apiBet,
+  win as apiWin,
+} from "./lib/api";
 
 /* ============ Cards / Blackjack ============ */
 const SUITS = ["♠", "♥", "♦", "♣"] as const;
@@ -37,27 +46,37 @@ function handValue(cards: { rank: string; suit: string }[]) {
 type Screen = "menu" | "bet" | "game" | "leaderboard" | "profile";
 type Turn = "player" | "dealer" | "end";
 type Result = "win" | "lose" | "push" | null;
-type HistoryItem = { id: string; when: string; bet: number; result: "win" | "lose" | "push"; you: number; opp: number };
+type UIHistoryItem = { id: string; when: string; bet: number; result: "win" | "lose" | "push"; you?: number; opp?: number };
 
 const cn = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ");
 const bg = "bg-[#0a0f14]";
 const BLUE = "#2176ff";
 
-/* ============ App ============ */
+// === helpers (id) ===
+const uid = () =>
+  // @ts-expect-error Telegram typings
+  (window?.Telegram?.WebApp?.initDataUnsafe?.user?.id
+    ? String(window.Telegram.WebApp.initDataUnsafe.user.id)
+    : "test_user");
+
+const newRoundId = () =>
+  (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+
+// === payout math (твои правила) ===
+const PAYOUT = {
+  win: (stake: number) => Math.floor(stake * 1.9), // комиссия 10%
+  push: (stake: number) => stake,                  // возврат ставки
+};
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>("menu");
+  const [userId, setUserId] = useState<string>("");
 
-  // economy — читаем из localStorage лениво (не сбрасывается при F5)
-  const [balance, setBalance] = useState<number>(() => {
-    try {
-      const raw = localStorage.getItem("balance_v1");
-      const n = raw ? Number(raw) : NaN;
-      return Number.isFinite(n) && n >= 0 ? n : 1000;
-    } catch {
-      return 1000;
-    }
-  });
-  const [history, setHistory] = useState<HistoryItem[]>(() => {
+  // баланс только с бэка
+  const [balance, setBalance] = useState<number>(0);
+
+  // историю для UI храним локально (чтобы показывать твои "Ты/Опп")
+  const [history, setHistory] = useState<UIHistoryItem[]>(() => {
     try {
       const raw = localStorage.getItem("history_v1");
       const arr = raw ? JSON.parse(raw) : [];
@@ -77,6 +96,10 @@ export default function App() {
   const [revealed, setRevealed] = useState(false);
   const [roundResult, setRoundResult] = useState<Result>(null);
 
+  // текущий roundId и stake на сервере
+  const [roundId, setRoundId] = useState<string | null>(null);
+  const [stakeOnServer, setStakeOnServer] = useState<number>(0);
+
   // bet countdown
   const BET_SECONDS = 10;
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
@@ -93,13 +116,45 @@ export default function App() {
   const pVal = useMemo(() => handValue(player), [player]);
   const dVal = useMemo(() => handValue(dealer), [dealer]);
 
-  /* ======== Persistence (save) ======== */
+  /* ======== Persistence (save history only) ======== */
   useEffect(() => {
-    try { localStorage.setItem("history_v1", JSON.stringify(history)); } catch {}
+    try {
+      localStorage.setItem("history_v1", JSON.stringify(history));
+    } catch {}
   }, [history]);
+
+  /* ======== Init from backend ======== */
   useEffect(() => {
-    try { localStorage.setItem("balance_v1", String(balance)); } catch {}
-  }, [balance]);
+    const id = uid();
+    setUserId(id);
+    (async () => {
+      try {
+        await initUser(id);
+        const b = await apiGetBalance(id);
+        setBalance(b.balance);
+        // тянем историю с сервера (агрегируем раунды в краткое представление для профиля)
+        const h = await apiGetHistory(id);
+        // простая агрегация: если по раунду есть win — считаем победой или пушем по сумме
+        const agg = aggregateServerHistory(h.history);
+        if (agg.length > 0) setHistory(mergeNoDups(history, agg));
+      } catch (e) {
+        // тихо, чтобы не пугать пользователя
+        console.error(e);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function refreshBalanceAndMaybeHistory() {
+    try {
+      const [b, h] = await Promise.all([apiGetBalance(userId), apiGetHistory(userId)]);
+      setBalance(b.balance);
+      const agg = aggregateServerHistory(h.history);
+      if (agg.length > 0) setHistory(mergeNoDups(history, agg));
+    } catch (e) {
+      console.error(e);
+    }
+  }
 
   /* ======== Helpers ======== */
   function resetGameState() {
@@ -109,6 +164,8 @@ export default function App() {
     setTurn("player");
     setRevealed(false);
     setRoundResult(null);
+    setStakeOnServer(0);
+    setRoundId(null);
   }
   function goMenu() {
     resetGameState();
@@ -144,15 +201,30 @@ export default function App() {
     return () => clearTimeout(t);
   }, [screen, secondsLeft]);
 
-  function confirmBetAndStart() {
+  async function confirmBetAndStart() {
     if (bet > balance) {
       alert("Недостаточно средств для ставки");
       return;
     }
-    setBalance((b) => b - bet);   // списание ставки
-    startRoundFromDeck(false);    // новая колода на старт
-    setScreen("game");
-    setSecondsLeft(null);
+    const rId = newRoundId();
+    try {
+      // списание на сервере
+      const res = await apiBet(userId, bet, rId);
+      if (!res.success) {
+        alert(res.message || "Не удалось сделать ставку");
+        return;
+      }
+      setBalance(res.balance);
+      setRoundId(rId);
+      setStakeOnServer(bet);
+
+      // локально запускаем сам раунд
+      startRoundFromDeck(false);
+      setScreen("game");
+      setSecondsLeft(null);
+    } catch (e: any) {
+      alert(e?.message || "Ошибка /bet");
+    }
   }
 
   /* ======== Menu actions ======== */
@@ -207,34 +279,59 @@ export default function App() {
       setTurn("end");
     }, 500);
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn]);
 
-  // end of round
+  // end of round -> начисления на сервере + локальная история
   useEffect(() => {
-    if (turn !== "end") return;
-    const p = pVal;
-    const o = dVal;
-    let res: NonNullable<Result> = "push";
-    if (p > 21 && o > 21) res = "push";
-    else if (p > 21) res = "lose";
-    else if (o > 21) res = "win";
-    else if (p > o) res = "win";
-    else if (p < o) res = "lose";
+    if (turn !== "end" || !roundId) return;
 
-    if (res === "win") setBalance((b) => b + Math.floor(bet * 1.9)); // комиссия 10%
-    if (res === "push") setBalance((b) => b + bet);                  // возврат ставки
+    (async () => {
+      const p = pVal;
+      const o = dVal;
 
-    const id =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : Math.random().toString(36).slice(2);
-    const item: HistoryItem = { id, when: new Date().toLocaleString(), bet, result: res, you: p, opp: o };
-    setHistory((h) => [item, ...h].slice(0, 50));
-    setRoundResult(res);
+      let res: Exclude<Result, null> = "push";
+      if (p > 21 && o > 21) res = "push";
+      else if (p > 21) res = "lose";
+      else if (o > 21) res = "win";
+      else if (p > o) res = "win";
+      else if (p < o) res = "lose";
+
+      try {
+        if (res === "win") {
+          const r = await apiWin(userId, PAYOUT.win(stakeOnServer), roundId);
+          if (r.success) setBalance(r.balance);
+        } else if (res === "push") {
+          const r = await apiWin(userId, PAYOUT.push(stakeOnServer), roundId);
+          if (r.success) setBalance(r.balance);
+        }
+      } catch (e) {
+        console.error("settle error:", e);
+      }
+
+      // локальная история (для твоего UI)
+      const id = newRoundId();
+      const item: UIHistoryItem = {
+        id,
+        when: new Date().toLocaleString(),
+        bet: stakeOnServer,
+        result: res,
+        you: p,
+        opp: o,
+      };
+      setHistory((h) => [item, ...h].slice(0, 50));
+
+      setRoundResult(res);
+      setRoundId(null);
+      setStakeOnServer(0);
+
+      // обновим баланс/серверную историю
+      refreshBalanceAndMaybeHistory();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn]);
 
   function nextRound() {
-    // перед каждым следующим раундом — снова стадия выбора ставки с таймером
     openBetStage();
   }
 
@@ -308,7 +405,6 @@ export default function App() {
             }}
           />
         ))}
-        {/* синий отблеск под стопкой */}
         <div className="absolute left-1/2 -translate-x-1/2 bottom-6 w-40 h-10 rounded-full blur-2xl"
              style={{ background: "radial-gradient(50% 50% at 50% 50%, rgba(33,118,255,.25), rgba(33,118,255,0))" }} />
       </div>
@@ -348,14 +444,13 @@ export default function App() {
         </p>
       </div>
 
-      {/* тут живая «тусующаяся» колода */}
       <ShuffleDeck />
     </div>
   );
 
-  // ставка с таймером (кольцо)
   const progress = secondsLeft == null ? 1 : secondsLeft / BET_SECONDS;
-  const CIRC = 34 * Math.PI; // окружность для r=17
+  const CIRC = 34 * Math.PI;
+
   const BetScreen = (
     <div className="p-4 space-y-6">
       <div className="flex items-center justify-between">
@@ -463,9 +558,9 @@ export default function App() {
         >
           <div className="flex items-center gap-2">
             <Info size={18}/>
-            {roundResult === "win"  && <span>Победа! +{Math.floor(bet * 1.9)}</span>}
+            {roundResult === "win"  && <span>Победа! +{PAYOUT.win(stakeOnServer)}</span>}
             {roundResult === "lose" && <span>Поражение…</span>}
-            {roundResult === "push" && <span>Ничья. +{bet}</span>}
+            {roundResult === "push" && <span>Ничья. +{PAYOUT.push(stakeOnServer)}</span>}
           </div>
         </div>
       )}
@@ -503,7 +598,7 @@ export default function App() {
 
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
         <div className="text-white/90 font-medium mb-2">Обмен (демо)</div>
-        <p className="text-white/60 text-sm">Позже подвяжем P2P/ваучеры/звёзды/Ton. Сейчас — тестовые кнопки:</p>
+        <p className="text-white/60 text-sm">Позже подвяжем P2P/ваучеры/звёзды/Ton. Сейчас — тестовые кнопки (только локально, баланс на сервере не меняют):</p>
         <div className="mt-3 grid grid-cols-3 gap-2">
           {[100, 500, 1000, 2500, 5000, 10000].map((v) => (
             <Button key={v} onClick={() => setBalance((b) => b + v)}>{`+${v}`}</Button>
@@ -514,6 +609,7 @@ export default function App() {
             <Button key={v} onClick={() => setBalance((b) => Math.max(0, b - v))}>{`-${v}`}</Button>
           ))}
         </div>
+        <div className="text-xs opacity-60 mt-2">* Эти кнопки демо. Для реального пополнения/вывода подключим API позже.</div>
       </div>
 
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
@@ -528,7 +624,13 @@ export default function App() {
             <div key={h.id} className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-[#0f1723]">
               <div className="text-white/80 text-sm">{h.when}</div>
               <div className="text-white text-sm">{h.result === "win" ? "+" : h.result === "lose" ? "-" : "±"}{h.bet}</div>
-              <div className="text-white/60 text-sm">Ты {h.you} • Опп {h.opp}</div>
+              <div className="text-white/60 text-sm">
+                {Number.isFinite(h.you) && Number.isFinite(h.opp) ? (
+                  <>Ты {h.you} • Опп {h.opp}</>
+                ) : (
+                  <>Результат: {h.result}</>
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -546,7 +648,6 @@ export default function App() {
       }}
     >
       <div className="max-w-md mx-auto h-[100dvh] flex flex-col">
-        {/* Top Bar */}
         <div className={cn("px-4 pt-4 pb-3 sticky top-0 z-10 border-b border-white/10", bg, "bg-opacity-80 backdrop-blur-md")}>
           <div className="flex items-center justify-between">
             <div className="text-white/80 text-sm tracking-wide">21 · 1 на 1</div>
@@ -554,7 +655,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Content */}
         <div className={cn("flex-1 overflow-auto px-2", screen === "game" || screen === "bet" ? "pb-8" : "pb-[calc(96px+env(safe-area-inset-bottom))]")}>
           <div className="mx-2">
             {screen === "menu" && MenuScreen}
@@ -565,7 +665,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Bottom Nav — скрыт на ставке и в игре */}
         {screen !== "game" && screen !== "bet" && (
           <nav className={cn("fixed bottom-0 left-0 right-0 z-50 border-t border-white/10", bg, "bg-opacity-80 backdrop-blur-md")}
                style={{ paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
@@ -607,4 +706,38 @@ function NavButton({
       <span>{label}</span>
     </button>
   );
+}
+
+/* ============ server history aggregator (optional) ============ */
+function aggregateServerHistory(raw: Array<{ roundId: string; userId: string; type: "bet" | "win"; amount: number; ts: number }>): UIHistoryItem[] {
+  const byRound = new Map<string, { bet?: number; win?: number; ts: number }>();
+  for (const x of raw) {
+    const m = byRound.get(x.roundId) || { ts: x.ts };
+    if (x.type === "bet") m.bet = x.amount;
+    if (x.type === "win") m.win = x.amount;
+    m.ts = Math.max(m.ts, x.ts);
+    byRound.set(x.roundId, m);
+  }
+  const out: UIHistoryItem[] = [];
+  for (const [rid, v] of byRound) {
+    const bet = v.bet ?? 0;
+    const win = v.win ?? 0;
+    let result: "win" | "lose" | "push" = "lose";
+    if (win === bet && win > 0) result = "push";
+    else if (win > bet) result = "win";
+    else if (win === 0) result = "lose";
+    out.push({ id: rid, when: new Date(v.ts).toLocaleString(), bet, result });
+  }
+  // свежие сверху
+  out.sort((a, b) => (a.when < b.when ? 1 : -1));
+  return out.slice(0, 50);
+}
+
+// слияние без дублей по id
+function mergeNoDups(current: UIHistoryItem[], incoming: UIHistoryItem[]): UIHistoryItem[] {
+  const seen = new Set(current.map((x) => x.id));
+  const merged = [...current];
+  for (const x of incoming) if (!seen.has(x.id)) merged.push(x);
+  // свежие сверху
+  return merged.sort((a, b) => (a.when < b.when ? 1 : -1)).slice(0, 50);
 }
