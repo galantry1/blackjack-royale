@@ -1,15 +1,7 @@
+# Frontend (Vite) ignores
 node_modules
 dist
 .env
-node_modules
-dist
-.env
-node_modules
-dist
-.env
-node_modules
-dist
-.env
-node_modules
-dist
-.env
+.env.*
+.DS_Store
+.vercel
