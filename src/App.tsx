@@ -15,7 +15,7 @@ const SUITS = ["♠", "♥", "♦", "♣"] as const;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"] as const;
 
 function createDeck() {
-  const deck: { rank: typeof RANKS[number]; suit: typeof SUITS[number] }[] = [];
+  const deck: { rank: (typeof RANKS)[number]; suit: (typeof SUITS)[number] }[] = [];
   for (const s of SUITS) for (const r of RANKS) deck.push({ rank: r, suit: s });
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -46,28 +46,37 @@ function handValue(cards: { rank: string; suit: string }[]) {
 type Screen = "menu" | "bet" | "game" | "leaderboard" | "profile";
 type Turn = "player" | "dealer" | "end";
 type Result = "win" | "lose" | "push" | null;
-type UIHistoryItem = { id: string; when: string; bet: number; result: "win" | "lose" | "push"; you?: number; opp?: number };
+type UIHistoryItem = {
+  id: string;
+  when: string;
+  bet: number;
+  result: "win" | "lose" | "push";
+  you?: number;
+  opp?: number;
+};
 
 const cn = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ");
 const bg = "bg-[#0a0f14]";
 const BLUE = "#2176ff";
 
-// === helpers (id) ===
-const uid = () =>
-  // @ts-expect-error Telegram typings
-  (window?.Telegram?.WebApp?.initDataUnsafe?.user?.id
-    ? String(window.Telegram.WebApp.initDataUnsafe.user.id)
-    : "test_user");
+/* ============ helpers (id, round, payout) ============ */
+
+// берём id из Telegram, иначе "test_user"
+const uid = () => {
+  const tgId = (window as any)?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  return tgId ? String(tgId) : "test_user";
+};
 
 const newRoundId = () =>
   (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
 
-// === payout math (твои правила) ===
+// твои правила выплат
 const PAYOUT = {
   win: (stake: number) => Math.floor(stake * 1.9), // комиссия 10%
-  push: (stake: number) => stake,                  // возврат ставки
+  push: (stake: number) => stake, // возврат ставки
 };
 
+/* ============ App ============ */
 export default function App() {
   const [screen, setScreen] = useState<Screen>("menu");
   const [userId, setUserId] = useState<string>("");
@@ -75,7 +84,7 @@ export default function App() {
   // баланс только с бэка
   const [balance, setBalance] = useState<number>(0);
 
-  // историю для UI храним локально (чтобы показывать твои "Ты/Опп")
+  // история для UI (локально, чтобы показывать "Ты/Опп")
   const [history, setHistory] = useState<UIHistoryItem[]>(() => {
     try {
       const raw = localStorage.getItem("history_v1");
@@ -132,13 +141,10 @@ export default function App() {
         await initUser(id);
         const b = await apiGetBalance(id);
         setBalance(b.balance);
-        // тянем историю с сервера (агрегируем раунды в краткое представление для профиля)
         const h = await apiGetHistory(id);
-        // простая агрегация: если по раунду есть win — считаем победой или пушем по сумме
         const agg = aggregateServerHistory(h.history);
-        if (agg.length > 0) setHistory(mergeNoDups(history, agg));
+        if (agg.length > 0) setHistory((prev) => mergeNoDups(prev, agg));
       } catch (e) {
-        // тихо, чтобы не пугать пользователя
         console.error(e);
       }
     })();
@@ -150,7 +156,7 @@ export default function App() {
       const [b, h] = await Promise.all([apiGetBalance(userId), apiGetHistory(userId)]);
       setBalance(b.balance);
       const agg = aggregateServerHistory(h.history);
-      if (agg.length > 0) setHistory(mergeNoDups(history, agg));
+      if (agg.length > 0) setHistory((prev) => mergeNoDups(prev, agg));
     } catch (e) {
       console.error(e);
     }
@@ -189,7 +195,7 @@ export default function App() {
     setSecondsLeft(BET_SECONDS);
     setScreen("bet");
   }
-  // countdown
+
   useEffect(() => {
     if (screen !== "bet" || secondsLeft == null) return;
     if (secondsLeft <= 0) {
@@ -208,7 +214,6 @@ export default function App() {
     }
     const rId = newRoundId();
     try {
-      // списание на сервере
       const res = await apiBet(userId, bet, rId);
       if (!res.success) {
         alert(res.message || "Не удалось сделать ставку");
@@ -218,7 +223,6 @@ export default function App() {
       setRoundId(rId);
       setStakeOnServer(bet);
 
-      // локально запускаем сам раунд
       startRoundFromDeck(false);
       setScreen("game");
       setSecondsLeft(null);
@@ -309,7 +313,6 @@ export default function App() {
         console.error("settle error:", e);
       }
 
-      // локальная история (для твоего UI)
       const id = newRoundId();
       const item: UIHistoryItem = {
         id,
@@ -325,7 +328,6 @@ export default function App() {
       setRoundId(null);
       setStakeOnServer(0);
 
-      // обновим баланс/серверную историю
       refreshBalanceAndMaybeHistory();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -355,7 +357,9 @@ export default function App() {
     />
   );
   const Pill = ({ children }: { children: React.ReactNode }) => (
-    <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-white/80 text-xs tracking-wide backdrop-blur-md">{children}</span>
+    <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-white/80 text-xs tracking-wide backdrop-blur-md">
+      {children}
+    </span>
   );
   const CardView = ({ c, hidden = false }: { c: { rank: string; suit: string }; hidden?: boolean }) => (
     <div
@@ -368,7 +372,8 @@ export default function App() {
     >
       {!hidden ? (
         <span className="text-xl sm:text-2xl" style={{ color: c.suit === "♥" || c.suit === "♦" ? BLUE : "#cfe2ff" }}>
-          {c.rank}<span className="ml-1 opacity-80">{c.suit}</span>
+          {c.rank}
+          <span className="ml-1 opacity-80">{c.suit}</span>
         </span>
       ) : (
         <span className="opacity-30">●●</span>
@@ -405,8 +410,10 @@ export default function App() {
             }}
           />
         ))}
-        <div className="absolute left-1/2 -translate-x-1/2 bottom-6 w-40 h-10 rounded-full blur-2xl"
-             style={{ background: "radial-gradient(50% 50% at 50% 50%, rgba(33,118,255,.25), rgba(33,118,255,0))" }} />
+        <div
+          className="absolute left-1/2 -translate-x-1/2 bottom-6 w-40 h-10 rounded-full blur-2xl"
+          style={{ background: "radial-gradient(50% 50% at 50% 50%, rgba(33,118,255,.25), rgba(33,118,255,0))" }}
+        />
       </div>
     </>
   );
@@ -454,7 +461,9 @@ export default function App() {
   const BetScreen = (
     <div className="p-4 space-y-6">
       <div className="flex items-center justify-between">
-        <Button onClick={goMenu} className="h-9 px-3">Назад</Button>
+        <Button onClick={goMenu} className="h-9 px-3">
+          Назад
+        </Button>
         <Pill>Баланс: {balance}</Pill>
       </div>
 
@@ -465,7 +474,12 @@ export default function App() {
             <svg width="40" height="40" viewBox="0 0 40 40">
               <circle cx="20" cy="20" r="17" stroke="rgba(255,255,255,.2)" strokeWidth="4" fill="none" />
               <circle
-                cx="20" cy="20" r="17" stroke={BLUE} strokeWidth="4" fill="none"
+                cx="20"
+                cy="20"
+                r="17"
+                stroke={BLUE}
+                strokeWidth="4"
+                fill="none"
                 strokeLinecap="round"
                 strokeDasharray={`${CIRC}`}
                 strokeDashoffset={`${CIRC * (1 - progress)}`}
@@ -485,12 +499,7 @@ export default function App() {
             </Button>
           ))}
         </div>
-        <Button
-          size="lg"
-          className="w-full mt-4"
-          onClick={confirmBetAndStart}
-          disabled={bet > balance}
-        >
+        <Button size="lg" className="w-full mt-4" onClick={confirmBetAndStart} disabled={bet > balance}>
           Подтвердить ставку
         </Button>
         {bet > balance && <div className="text-rose-300 text-sm mt-2">Недостаточно средств</div>}
@@ -501,7 +510,9 @@ export default function App() {
   const GameScreen = (
     <div className="p-4">
       <div className="flex items-center justify-between mb-3">
-        <Button onClick={backFromGame} className="h-9 px-3">Назад</Button>
+        <Button onClick={backFromGame} className="h-9 px-3">
+          Назад
+        </Button>
         <Pill>Баланс: {balance}</Pill>
       </div>
 
@@ -535,13 +546,21 @@ export default function App() {
       <div className="mt-8 grid grid-cols-2 gap-3">
         {turn === "player" ? (
           <>
-            <Button size="lg" onClick={hit} className="w-full">Взять</Button>
-            <Button size="lg" onClick={stand} className="w-full">Стоп</Button>
+            <Button size="lg" onClick={hit} className="w-full">
+              Взять
+            </Button>
+            <Button size="lg" onClick={stand} className="w-full">
+              Стоп
+            </Button>
           </>
         ) : turn === "end" ? (
-          <Button size="lg" onClick={nextRound} className="col-span-2 w-full">Следующий раунд</Button>
+          <Button size="lg" onClick={nextRound} className="col-span-2 w-full">
+            Следующий раунд
+          </Button>
         ) : (
-          <Button disabled size="lg" className="col-span-2 w-full">Ход оппонента…</Button>
+          <Button disabled size="lg" className="col-span-2 w-full">
+            Ход оппонента…
+          </Button>
         )}
       </div>
 
@@ -551,14 +570,16 @@ export default function App() {
           className={cn(
             "fixed left-1/2 -translate-x-1/2 bottom-[calc(96px+env(safe-area-inset-bottom))] z-40",
             "px-4 py-3 rounded-2xl border backdrop-blur-md",
-            roundResult === "win" ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-200"
-            : roundResult === "lose" ? "bg-rose-500/15 border-rose-500/30 text-rose-200"
-            : "bg-white/10 border-white/20 text-white/80"
+            roundResult === "win"
+              ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-200"
+              : roundResult === "lose"
+              ? "bg-rose-500/15 border-rose-500/30 text-rose-200"
+              : "bg-white/10 border-white/20 text-white/80"
           )}
         >
           <div className="flex items-center gap-2">
-            <Info size={18}/>
-            {roundResult === "win"  && <span>Победа! +{PAYOUT.win(stakeOnServer)}</span>}
+            <Info size={18} />
+            {roundResult === "win" && <span>Победа! +{PAYOUT.win(stakeOnServer)}</span>}
             {roundResult === "lose" && <span>Поражение…</span>}
             {roundResult === "push" && <span>Ничья. +{PAYOUT.push(stakeOnServer)}</span>}
           </div>
@@ -570,15 +591,20 @@ export default function App() {
   const LeaderboardScreen = (
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold text-white flex items-center gap-2"><Crown size={18}/> Таблица лидеров</h2>
+        <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+          <Crown size={18} /> Таблица лидеров
+        </h2>
         <Pill>ТОП по победам</Pill>
       </div>
       <div className="space-y-2">
-        {leaders.map((u, i) => (
-          <div key={u.id} className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
+        {leaders.map((u) => (
+          <div
+            key={u.id}
+            className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md"
+          >
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-xl border border-white/10 bg-gradient-to-br from-[#1e293b] to-[#0b1220] grid place-items-center text-white/80 shadow-[0_8px_20px_-12px_rgba(0,0,0,.7)]">
-                {u.id.slice(1,2).toUpperCase()}
+                {u.id.slice(1, 2).toUpperCase()}
               </div>
               <div className="text-white">{u.id}</div>
             </div>
@@ -592,13 +618,18 @@ export default function App() {
   const ProfileScreen = (
     <div className="p-4 space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-white flex items-center gap-2"><User2 size={18}/> Профиль</h2>
+        <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+          <User2 size={18} /> Профиль
+        </h2>
         <Pill>Баланс: {balance}</Pill>
       </div>
 
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
         <div className="text-white/90 font-medium mb-2">Обмен (демо)</div>
-        <p className="text-white/60 text-sm">Позже подвяжем P2P/ваучеры/звёзды/Ton. Сейчас — тестовые кнопки (только локально, баланс на сервере не меняют):</p>
+        <p className="text-white/60 text-sm">
+          Позже подвяжем P2P/ваучеры/звёзды/Ton. Сейчас — тестовые кнопки (только локально, баланс на
+          сервере не меняют):
+        </p>
         <div className="mt-3 grid grid-cols-3 gap-2">
           {[100, 500, 1000, 2500, 5000, 10000].map((v) => (
             <Button key={v} onClick={() => setBalance((b) => b + v)}>{`+${v}`}</Button>
@@ -609,11 +640,15 @@ export default function App() {
             <Button key={v} onClick={() => setBalance((b) => Math.max(0, b - v))}>{`-${v}`}</Button>
           ))}
         </div>
-        <div className="text-xs opacity-60 mt-2">* Эти кнопки демо. Для реального пополнения/вывода подключим API позже.</div>
+        <div className="text-xs opacity-60 mt-2">
+          * Эти кнопки демо. Для реального пополнения/вывода подключим API позже.
+        </div>
       </div>
 
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
-        <div className="flex items-center gap-2 text-white/90 font-medium"><History size={18}/> История игр</div>
+        <div className="flex items-center gap-2 text-white/90 font-medium">
+          <History size={18} /> История игр
+        </div>
         <div className="mt-3 space-y-2 max-h-60 overflow-auto pr-1">
           {history.length === 0 && (
             <div className="text-white/60 text-sm flex items-center gap-3 p-3 border border-white/10 rounded-2xl bg-[#0f1723]">
@@ -621,9 +656,15 @@ export default function App() {
             </div>
           )}
           {history.map((h) => (
-            <div key={h.id} className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-[#0f1723]">
+            <div
+              key={h.id}
+              className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-[#0f1723]"
+            >
               <div className="text-white/80 text-sm">{h.when}</div>
-              <div className="text-white text-sm">{h.result === "win" ? "+" : h.result === "lose" ? "-" : "±"}{h.bet}</div>
+              <div className="text-white text-sm">
+                {h.result === "win" ? "+" : h.result === "lose" ? "-" : "±"}
+                {h.bet}
+              </div>
               <div className="text-white/60 text-sm">
                 {Number.isFinite(h.you) && Number.isFinite(h.opp) ? (
                   <>Ты {h.you} • Опп {h.opp}</>
@@ -648,6 +689,7 @@ export default function App() {
       }}
     >
       <div className="max-w-md mx-auto h-[100dvh] flex flex-col">
+        {/* Top Bar */}
         <div className={cn("px-4 pt-4 pb-3 sticky top-0 z-10 border-b border-white/10", bg, "bg-opacity-80 backdrop-blur-md")}>
           <div className="flex items-center justify-between">
             <div className="text-white/80 text-sm tracking-wide">21 · 1 на 1</div>
@@ -655,7 +697,13 @@ export default function App() {
           </div>
         </div>
 
-        <div className={cn("flex-1 overflow-auto px-2", screen === "game" || screen === "bet" ? "pb-8" : "pb-[calc(96px+env(safe-area-inset-bottom))]")}>
+        {/* Content */}
+        <div
+          className={cn(
+            "flex-1 overflow-auto px-2",
+            screen === "game" || screen === "bet" ? "pb-8" : "pb-[calc(96px+env(safe-area-inset-bottom))]"
+          )}
+        >
           <div className="mx-2">
             {screen === "menu" && MenuScreen}
             {screen === "bet" && BetScreen}
@@ -665,13 +713,31 @@ export default function App() {
           </div>
         </div>
 
+        {/* Bottom Nav — скрыт на ставке и в игре */}
         {screen !== "game" && screen !== "bet" && (
-          <nav className={cn("fixed bottom-0 left-0 right-0 z-50 border-t border-white/10", bg, "bg-opacity-80 backdrop-blur-md")}
-               style={{ paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
+          <nav
+            className={cn("fixed bottom-0 left-0 right-0 z-50 border-t border-white/10", bg, "bg-opacity-80 backdrop-blur-md")}
+            style={{ paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}
+          >
             <div className="max-w-md mx-auto grid grid-cols-3 gap-2 p-2">
-              <NavButton label="Меню" icon={<Gamepad2 size={18} />} active={screen === "menu"} onClick={() => setScreen("menu")} />
-              <NavButton label="Лидеры" icon={<Crown size={18} />} active={screen === "leaderboard"} onClick={() => setScreen("leaderboard")} />
-              <NavButton label="Профиль" icon={<User2 size={18} />} active={screen === "profile"} onClick={() => setScreen("profile")} />
+              <NavButton
+                label="Меню"
+                icon={<Gamepad2 size={18} />}
+                active={screen === "menu"}
+                onClick={() => setScreen("menu")}
+              />
+              <NavButton
+                label="Лидеры"
+                icon={<Crown size={18} />}
+                active={screen === "leaderboard"}
+                onClick={() => setScreen("leaderboard")}
+              />
+              <NavButton
+                label="Профиль"
+                icon={<User2 size={18} />}
+                active={screen === "profile"}
+                onClick={() => setScreen("profile")}
+              />
             </div>
           </nav>
         )}
@@ -709,7 +775,9 @@ function NavButton({
 }
 
 /* ============ server history aggregator (optional) ============ */
-function aggregateServerHistory(raw: Array<{ roundId: string; userId: string; type: "bet" | "win"; amount: number; ts: number }>): UIHistoryItem[] {
+function aggregateServerHistory(
+  raw: Array<{ roundId: string; userId: string; type: "bet" | "win"; amount: number; ts: number }>
+): UIHistoryItem[] {
   const byRound = new Map<string, { bet?: number; win?: number; ts: number }>();
   for (const x of raw) {
     const m = byRound.get(x.roundId) || { ts: x.ts };
@@ -738,6 +806,5 @@ function mergeNoDups(current: UIHistoryItem[], incoming: UIHistoryItem[]): UIHis
   const seen = new Set(current.map((x) => x.id));
   const merged = [...current];
   for (const x of incoming) if (!seen.has(x.id)) merged.push(x);
-  // свежие сверху
   return merged.sort((a, b) => (a.when < b.when ? 1 : -1)).slice(0, 50);
 }
