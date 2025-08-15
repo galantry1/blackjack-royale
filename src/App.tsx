@@ -62,10 +62,27 @@ const BLUE = "#2176ff";
 /* ============ helpers (id, round, payout) ============ */
 
 // берём id из Telegram, иначе "test_user"
+// берём реальный id в Telegram WebApp, иначе — уникальный гостевой id в браузере
 const uid = () => {
   const tgId = (window as any)?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
-  return tgId ? String(tgId) : "test_user";
+  if (tgId) return `tg_${tgId}`;
+
+  try {
+    const KEY = "guest_uid_v1";
+    const saved = localStorage.getItem(KEY);
+    if (saved) return saved;
+
+    const gen =
+      "guest_" +
+      ((globalThis as any)?.crypto?.randomUUID?.() ||
+        Math.random().toString(36).slice(2));
+    localStorage.setItem(KEY, gen);
+    return gen;
+  } catch {
+    return "guest_" + Math.random().toString(36).slice(2);
+  }
 };
+
 
 const newRoundId = () =>
   (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
