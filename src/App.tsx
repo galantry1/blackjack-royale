@@ -1,21 +1,28 @@
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Crown, User2, Gamepad2, Users2, History, Info } from "lucide-react";
 
-// === API (наш сервер) ===
+// ==== API (наш бэкенд) ====
 import {
   initUser,
   getBalance as apiGetBalance,
-  getHistory as apiGetHistory,
+  getHistory as apiGetHistory, // если захочешь показывать серверную историю
   bet as apiBet,
   win as apiWin,
+  getLeaderboard,
+  type LeaderboardRow,
+  getRefLink,
+  topup,
+  applyRef,
 } from "./lib/api";
 
-/* ============ Cards / Blackjack ============ */
+/* =================== Cards / Blackjack =================== */
 const SUITS = ["♠", "♥", "♦", "♣"] as const;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"] as const;
 
+type Card = { rank: typeof RANKS[number]; suit: typeof SUITS[number] };
+
 function createDeck() {
-  const deck: { rank: (typeof RANKS)[number]; suit: (typeof SUITS)[number] }[] = [];
+  const deck: Card[] = [];
   for (const s of SUITS) for (const r of RANKS) deck.push({ rank: r, suit: s });
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -42,10 +49,11 @@ function handValue(cards: { rank: string; suit: string }[]) {
   return total;
 }
 
-/* ============ Types / UI utils ============ */
-type Screen = "menu" | "bet" | "game" | "leaderboard" | "profile";
+/* =================== Types / UI utils =================== */
+type Screen = "menu" | "bet" | "game" | "leaderboard" | "profile" | "partners";
 type Turn = "player" | "dealer" | "end";
 type Result = "win" | "lose" | "push" | null;
+
 type UIHistoryItem = {
   id: string;
   when: string;
@@ -59,30 +67,21 @@ const cn = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ")
 const bg = "bg-[#0a0f14]";
 const BLUE = "#2176ff";
 
-/* ============ helpers (id, round, payout) ============ */
+/* =================== helpers (id, round, payout) =================== */
 
-// берём id из Telegram, иначе "test_user"
-// берём реальный id в Telegram WebApp, иначе — уникальный гостевой id в браузере
-const uid = () => {
+// берём id из Telegram, иначе постоянный guest_<uuid> в localStorage
+function uid(): string {
   const tgId = (window as any)?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
   if (tgId) return `tg_${tgId}`;
-
-  try {
-    const KEY = "guest_uid_v1";
-    const saved = localStorage.getItem(KEY);
-    if (saved) return saved;
-
-    const gen =
-      "guest_" +
-      ((globalThis as any)?.crypto?.randomUUID?.() ||
-        Math.random().toString(36).slice(2));
-    localStorage.setItem(KEY, gen);
-    return gen;
-  } catch {
-    return "guest_" + Math.random().toString(36).slice(2);
+  const key = "guest_id_v1";
+  let g = localStorage.getItem(key);
+  if (!g) {
+    const r = (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+    g = `guest_${r}`;
+    localStorage.setItem(key, g);
   }
-};
-
+  return g;
+}
 
 const newRoundId = () =>
   (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
@@ -93,7 +92,133 @@ const PAYOUT = {
   push: (stake: number) => stake, // возврат ставки
 };
 
-/* ============ App ============ */
+/* =================== Малые UI-атомы =================== */
+
+const Button: React.FC<
+  React.ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean; size?: "lg" | "md" | "sm" }
+> = ({ className, active, size = "md", ...props }) => (
+  <button
+    {...props}
+    className={cn(
+      "rounded-2xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+      "border border-white/10 text-white",
+      active ? "bg-neutral-700 ring-2 ring-[#2176ff]/40" : "bg-white/5 hover:bg-white/10 hover:ring-2 ring-[#2176ff]/30",
+      size === "lg" && "h-14 px-6 text-lg",
+      size === "md" && "h-12 px-5 text-base",
+      size === "sm" && "h-9 px-4 text-sm",
+      "backdrop-blur-md shadow-[0_10px_40px_-20px_rgba(0,0,0,.6)]",
+      className
+    )}
+    style={{ outline: "none" }}
+  />
+);
+
+const Pill = ({ children }: { children: React.ReactNode }) => (
+  <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-white/80 text-xs tracking-wide backdrop-blur-md">
+    {children}
+  </span>
+);
+
+const CardView = ({ c, hidden = false }: { c: Card; hidden?: boolean }) => (
+  <div
+    className={cn(
+      "w-16 h-24 sm:w-20 sm:h-28 rounded-2xl border flex items-center justify-center font-semibold select-none",
+      "border-white/10 bg-[#111827]/90 text-white backdrop-blur-md",
+      "shadow-[0_14px_28px_-16px_rgba(0,0,0,.8)]",
+      hidden && "bg-[#0e141b]/90 border-white/5"
+    )}
+  >
+    {!hidden ? (
+      <span className="text-xl sm:text-2xl" style={{ color: c.suit === "♥" || c.suit === "♦" ? BLUE : "#cfe2ff" }}>
+        {c.rank}
+        <span className="ml-1 opacity-80">{c.suit}</span>
+      </span>
+    ) : (
+      <span className="opacity-30">●●</span>
+    )}
+  </div>
+);
+
+/* ============ Shuffle Deck (menu decoration) ============ */
+const ShuffleDeck = () => (
+  <>
+    <style>{`
+      @keyframes shuffleCard {
+        0%   { transform: translate(-50%, -50%) rotate(-6deg);   }
+        25%  { transform: translate(calc(-50% + 28px), -50%) rotate(2deg); }
+        50%  { transform: translate(-50%, -50%) rotate(6deg);    }
+        75%  { transform: translate(calc(-50% - 28px), -50%) rotate(-2deg); }
+        100% { transform: translate(-50%, -50%) rotate(-6deg);   }
+      }
+    `}</style>
+    <div className="relative mt-6 h-36">
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div
+          key={i}
+          className="absolute left-1/2 top-1/2 w-16 h-24 rounded-2xl border backdrop-blur-md"
+          style={{
+            transform: "translate(-50%, -50%)",
+            animation: `shuffleCard 3.2s ease-in-out ${i * 0.18}s infinite`,
+            zIndex: 10 + i,
+            borderColor: "rgba(255,255,255,0.12)",
+            background: "linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03))",
+            boxShadow: "0 10px 40px -20px rgba(0,0,0,.7), inset 0 0 0 1px rgba(33,118,255,.15)",
+          }}
+        />
+      ))}
+      <div
+        className="absolute left-1/2 -translate-x-1/2 bottom-6 w-40 h-10 rounded-full blur-2xl"
+        style={{ background: "radial-gradient(50% 50% at 50% 50%, rgba(33,118,255,.25), rgba(33,118,255,0))" }}
+      />
+    </div>
+  </>
+);
+
+/* ============ Live Ticker (полоса пополнений) ============ */
+const LiveTicker: React.FC = () => {
+  const [items, setItems] = useState<{ id: string; amount: number }[]>(
+    () => Array.from({ length: 12 }, (_, i) => ({ id: `init_${i}`, amount: [40, 80, 120, 200, 40, 80][i % 6] }))
+  );
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      setItems((prev) => {
+        const next = [
+          ...prev.slice(1),
+          {
+            id: (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2),
+            amount: [40, 40, 80, 200, 40, 40, 80, 120][Math.floor(Math.random() * 8)],
+          },
+        ];
+        return next;
+      });
+    }, 1800);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <div className="px-3 mt-2">
+      <div className="flex items-center gap-2 text-white/70 text-sm mb-2">
+        <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Live
+      </div>
+      <div className="overflow-hidden rounded-2xl border border-white/10 bg-white/5">
+        <div className="flex gap-2 animate-[ticker_12s_linear_infinite] px-2 py-2">
+          {items.map((it) => (
+            <div
+              key={it.id}
+              className="px-4 py-2 rounded-xl border border-white/10 bg-[#0f1723] text-amber-300 font-semibold"
+            >
+              +{it.amount}
+            </div>
+          ))}
+        </div>
+      </div>
+      <style>{`@keyframes ticker{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}`}</style>
+    </div>
+  );
+};
+
+/* =================== App =================== */
 export default function App() {
   const [screen, setScreen] = useState<Screen>("menu");
   const [userId, setUserId] = useState<string>("");
@@ -101,7 +226,7 @@ export default function App() {
   // баланс только с бэка
   const [balance, setBalance] = useState<number>(0);
 
-  // история для UI (локально, чтобы показывать "Ты/Опп")
+  // локальная история только для UI
   const [history, setHistory] = useState<UIHistoryItem[]>(() => {
     try {
       const raw = localStorage.getItem("history_v1");
@@ -116,8 +241,8 @@ export default function App() {
 
   // game state
   const [deck, setDeck] = useState(createDeck());
-  const [player, setPlayer] = useState<{ rank: string; suit: string }[]>([]);
-  const [dealer, setDealer] = useState<{ rank: string; suit: string }[]>([]);
+  const [player, setPlayer] = useState<Card[]>([]);
+  const [dealer, setDealer] = useState<Card[]>([]);
   const [turn, setTurn] = useState<Turn>("player");
   const [revealed, setRevealed] = useState(false);
   const [roundResult, setRoundResult] = useState<Result>(null);
@@ -126,18 +251,16 @@ export default function App() {
   const [roundId, setRoundId] = useState<string | null>(null);
   const [stakeOnServer, setStakeOnServer] = useState<number>(0);
 
+  // leaderboard
+  const [leaders, setLeaders] = useState<LeaderboardRow[] | null>(null);
+  const [lbMetric, setLbMetric] = useState<"wins" | "profit">("wins");
+
+  // partners
+  const [refLink, setRefLink] = useState<string>("");
+
   // bet countdown
   const BET_SECONDS = 10;
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
-
-  // demo leaderboard
-  const [leaders] = useState([
-    { id: "@stealth", wins: 128 },
-    { id: "@galantry", wins: 97 },
-    { id: "@nicita", wins: 76 },
-    { id: "@neo", wins: 55 },
-    { id: "@mira", wins: 41 },
-  ]);
 
   const pVal = useMemo(() => handValue(player), [player]);
   const dVal = useMemo(() => handValue(dealer), [dealer]);
@@ -155,27 +278,45 @@ export default function App() {
     setUserId(id);
     (async () => {
       try {
-        await initUser(id);
+        await initUser(id); // стартовый баланс для гостя/нового юзера
         const b = await apiGetBalance(id);
         setBalance(b.balance);
-        const h = await apiGetHistory(id);
-        const agg = aggregateServerHistory(h.history);
-        if (agg.length > 0) setHistory((prev) => mergeNoDups(prev, agg));
       } catch (e) {
         console.error(e);
       }
     })();
+
+    // если пришли по реф-ссылке ?ref=CODE — привязываем
+    const url = new URL(window.location.href);
+    const ref = url.searchParams.get("ref");
+    if (ref) applyRef(id, ref).catch(() => {});
+
+    // лидерборд
+    loadLeaderboard("wins");
+
+    // партнёрская ссылка
+    getRefLink(id)
+      .then((r) => setRefLink(r.web || r.telegram))
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function refreshBalanceAndMaybeHistory() {
+  async function refreshBalance() {
     try {
-      const [b, h] = await Promise.all([apiGetBalance(userId), apiGetHistory(userId)]);
+      const b = await apiGetBalance(userId);
       setBalance(b.balance);
-      const agg = aggregateServerHistory(h.history);
-      if (agg.length > 0) setHistory((prev) => mergeNoDups(prev, agg));
     } catch (e) {
       console.error(e);
+    }
+  }
+
+  async function loadLeaderboard(metric: "wins" | "profit" = lbMetric) {
+    try {
+      const d = await getLeaderboard(metric, 20);
+      setLeaders(d.entries);
+    } catch (e) {
+      console.error(e);
+      setLeaders([]);
     }
   }
 
@@ -212,7 +353,7 @@ export default function App() {
     setSecondsLeft(BET_SECONDS);
     setScreen("bet");
   }
-
+  // countdown
   useEffect(() => {
     if (screen !== "bet" || secondsLeft == null) return;
     if (secondsLeft <= 0) {
@@ -231,6 +372,7 @@ export default function App() {
     }
     const rId = newRoundId();
     try {
+      // списание на сервере
       const res = await apiBet(userId, bet, rId);
       if (!res.success) {
         alert(res.message || "Не удалось сделать ставку");
@@ -240,6 +382,7 @@ export default function App() {
       setRoundId(rId);
       setStakeOnServer(bet);
 
+      // локально запускаем сам раунд
       startRoundFromDeck(false);
       setScreen("game");
       setSecondsLeft(null);
@@ -330,6 +473,7 @@ export default function App() {
         console.error("settle error:", e);
       }
 
+      // локальная UI-история
       const id = newRoundId();
       const item: UIHistoryItem = {
         id,
@@ -345,7 +489,9 @@ export default function App() {
       setRoundId(null);
       setStakeOnServer(0);
 
-      refreshBalanceAndMaybeHistory();
+      // обновим баланс и лидерборд
+      refreshBalance();
+      loadLeaderboard();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn]);
@@ -354,88 +500,8 @@ export default function App() {
     openBetStage();
   }
 
-  /* ============ Small UI atoms ============ */
-  const Button: React.FC<
-    React.ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean; size?: "lg" | "md" | "sm" }
-  > = ({ className, active, size = "md", ...props }) => (
-    <button
-      {...props}
-      className={cn(
-        "rounded-2xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
-        "border border-white/10 text-white",
-        active ? "bg-neutral-700 ring-2 ring-[#2176ff]/40" : "bg-white/5 hover:bg-white/10 hover:ring-2 ring-[#2176ff]/30",
-        size === "lg" && "h-14 px-6 text-lg",
-        size === "md" && "h-12 px-5 text-base",
-        size === "sm" && "h-9 px-4 text-sm",
-        "backdrop-blur-md shadow-[0_10px_40px_-20px_rgba(0,0,0,.6)]",
-        className
-      )}
-      style={{ outline: "none" }}
-    />
-  );
-  const Pill = ({ children }: { children: React.ReactNode }) => (
-    <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-white/80 text-xs tracking-wide backdrop-blur-md">
-      {children}
-    </span>
-  );
-  const CardView = ({ c, hidden = false }: { c: { rank: string; suit: string }; hidden?: boolean }) => (
-    <div
-      className={cn(
-        "w-16 h-24 sm:w-20 sm:h-28 rounded-2xl border flex items-center justify-center font-semibold select-none",
-        "border-white/10 bg-[#111827]/90 text-white backdrop-blur-md",
-        "shadow-[0_14px_28px_-16px_rgba(0,0,0,.8)]",
-        hidden && "bg-[#0e141b]/90 border-white/5"
-      )}
-    >
-      {!hidden ? (
-        <span className="text-xl sm:text-2xl" style={{ color: c.suit === "♥" || c.suit === "♦" ? BLUE : "#cfe2ff" }}>
-          {c.rank}
-          <span className="ml-1 opacity-80">{c.suit}</span>
-        </span>
-      ) : (
-        <span className="opacity-30">●●</span>
-      )}
-    </div>
-  );
+  /* =================== Screens =================== */
 
-  /* ============ Shuffle Deck (menu decoration) ============ */
-  const ShuffleDeck = () => (
-    <>
-      <style>{`
-        @keyframes shuffleCard {
-          0%   { transform: translate(-50%, -50%) rotate(-6deg);   }
-          25%  { transform: translate(calc(-50% + 28px), -50%) rotate(2deg); }
-          50%  { transform: translate(-50%, -50%) rotate(6deg);    }
-          75%  { transform: translate(calc(-50% - 28px), -50%) rotate(-2deg); }
-          100% { transform: translate(-50%, -50%) rotate(-6deg);   }
-        }
-      `}</style>
-      <div className="relative mt-6 h-36">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <div
-            key={i}
-            className="absolute left-1/2 top-1/2 w-16 h-24 rounded-2xl border backdrop-blur-md"
-            style={{
-              transform: "translate(-50%, -50%)",
-              animation: `shuffleCard 3.2s ease-in-out ${i * 0.18}s infinite`,
-              zIndex: 10 + i,
-              borderColor: "rgba(255,255,255,0.12)",
-              background:
-                "linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03))",
-              boxShadow:
-                "0 10px 40px -20px rgba(0,0,0,.7), inset 0 0 0 1px rgba(33,118,255,.15)",
-            }}
-          />
-        ))}
-        <div
-          className="absolute left-1/2 -translate-x-1/2 bottom-6 w-40 h-10 rounded-full blur-2xl"
-          style={{ background: "radial-gradient(50% 50% at 50% 50%, rgba(33,118,255,.25), rgba(33,118,255,0))" }}
-        />
-      </div>
-    </>
-  );
-
-  /* ============ Screens ============ */
   const MenuScreen = (
     <div className="p-4 space-y-6">
       <div className="flex items-center justify-between">
@@ -445,6 +511,8 @@ export default function App() {
         </div>
         <Pill>Баланс: {balance}</Pill>
       </div>
+
+      <LiveTicker />
 
       <div className="grid gap-3 mt-4">
         <Button size="lg" onClick={onPlay} className="w-full">
@@ -611,24 +679,54 @@ export default function App() {
         <h2 className="text-xl font-semibold text-white flex items-center gap-2">
           <Crown size={18} /> Таблица лидеров
         </h2>
-        <Pill>ТОП по победам</Pill>
-      </div>
-      <div className="space-y-2">
-        {leaders.map((u) => (
-          <div
-            key={u.id}
-            className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md"
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            active={lbMetric === "wins"}
+            onClick={() => {
+              setLbMetric("wins");
+              loadLeaderboard("wins");
+            }}
           >
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl border border-white/10 bg-gradient-to-br from-[#1e293b] to-[#0b1220] grid place-items-center text-white/80 shadow-[0_8px_20px_-12px_rgba(0,0,0,.7)]">
-                {u.id.slice(1, 2).toUpperCase()}
-              </div>
-              <div className="text-white">{u.id}</div>
-            </div>
-            <div className="text-white/80">{u.wins} побед</div>
-          </div>
-        ))}
+            ТОП по победам
+          </Button>
+          <Button
+            size="sm"
+            active={lbMetric === "profit"}
+            onClick={() => {
+              setLbMetric("profit");
+              loadLeaderboard("profit");
+            }}
+          >
+            По профиту
+          </Button>
+        </div>
       </div>
+
+      {!leaders && <div className="text-white/60">Загрузка…</div>}
+      {leaders && leaders.length === 0 && (
+        <div className="text-white/60">Пока пусто — сыграй несколько раундов.</div>
+      )}
+      {leaders && leaders.length > 0 && (
+        <div className="space-y-2">
+          {leaders.map((u) => (
+            <div
+              key={u.userId}
+              className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl border border-white/10 bg-gradient-to-br from-[#1e293b] to-[#0b1220] grid place-items-center text-white/80">
+                  {(u.userId.match(/[a-z0-9]/i)?.[0] || "U").toUpperCase()}
+                </div>
+                <div className="text-white truncate max-w-[160px]">{u.userId}</div>
+              </div>
+              <div className="text-white/80">
+                {lbMetric === "wins" ? `${u.wins} побед` : `${u.profit > 0 ? "+" : ""}${u.profit}`}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 
@@ -642,30 +740,7 @@ export default function App() {
       </div>
 
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
-        <div className="text-white/90 font-medium mb-2">Обмен (демо)</div>
-        <p className="text-white/60 text-sm">
-          Позже подвяжем P2P/ваучеры/звёзды/Ton. Сейчас — тестовые кнопки (только локально, баланс на
-          сервере не меняют):
-        </p>
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          {[100, 500, 1000, 2500, 5000, 10000].map((v) => (
-            <Button key={v} onClick={() => setBalance((b) => b + v)}>{`+${v}`}</Button>
-          ))}
-        </div>
-        <div className="mt-2 grid grid-cols-3 gap-2">
-          {[100, 500, 1000, 2500].map((v) => (
-            <Button key={v} onClick={() => setBalance((b) => Math.max(0, b - v))}>{`-${v}`}</Button>
-          ))}
-        </div>
-        <div className="text-xs opacity-60 mt-2">
-          * Эти кнопки демо. Для реального пополнения/вывода подключим API позже.
-        </div>
-      </div>
-
-      <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
-        <div className="flex items-center gap-2 text-white/90 font-medium">
-          <History size={18} /> История игр
-        </div>
+        <div className="text-white/90 font-medium mb-2">История (локальная)</div>
         <div className="mt-3 space-y-2 max-h-60 overflow-auto pr-1">
           {history.length === 0 && (
             <div className="text-white/60 text-sm flex items-center gap-3 p-3 border border-white/10 rounded-2xl bg-[#0f1723]">
@@ -696,18 +771,65 @@ export default function App() {
     </div>
   );
 
-  /* ============ Root Layout ============ */
+  const PartnersScreen = (
+    <div className="p-4 space-y-4">
+      <h2 className="text-xl font-semibold text-white">Партнёры</h2>
+
+      <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md space-y-3">
+        <div className="text-white/80 text-sm">
+          Делись ссылкой и получай <b>5%</b> от каждого пополнения друга.
+        </div>
+        <div className="text-white/70 text-xs break-all p-3 rounded-xl bg-[#0f1723] border border-white/10">
+          {refLink || "—"}
+        </div>
+        <div className="flex gap-2">
+          <Button
+            onClick={() => {
+              if (refLink) navigator.clipboard.writeText(refLink);
+            }}
+          >
+            Скопировать
+          </Button>
+          <Button
+            onClick={async () => {
+              const r = prompt("Тест: пополнить на сумму (например 200)");
+              if (!r) return;
+              const n = Number(r);
+              if (!Number.isFinite(n) || n <= 0) return;
+              const t = await topup(userId, n);
+              setBalance(t.balance);
+              alert(`Баланс пополнен на ${n}`);
+              loadLeaderboard();
+            }}
+          >
+            Тестовое пополнение
+          </Button>
+        </div>
+        <div className="text-white/50 text-xs">
+          * Для продакшена подключим реальные платежи и автоначисление 5%.
+        </div>
+      </div>
+    </div>
+  );
+
+  /* =================== Root Layout =================== */
   return (
     <div
       className={cn("min-h-screen w-full", bg)}
       style={{
-        backgroundImage:
-          `radial-gradient(800px 400px at 50% -150px, rgba(33,118,255,0.18), rgba(10,15,20,0)), radial-gradient(600px 300px at 20% 120%, rgba(33,118,255,0.15), rgba(10,15,20,0))`,
+        backgroundImage: `radial-gradient(800px 400px at 50% -150px, rgba(33,118,255,0.18), rgba(10,15,20,0)),
+                          radial-gradient(600px 300px at 20% 120%, rgba(33,118,255,0.15), rgba(10,15,20,0))`,
       }}
     >
       <div className="max-w-md mx-auto h-[100dvh] flex flex-col">
         {/* Top Bar */}
-        <div className={cn("px-4 pt-4 pb-3 sticky top-0 z-10 border-b border-white/10", bg, "bg-opacity-80 backdrop-blur-md")}>
+        <div
+          className={cn(
+            "px-4 pt-4 pb-3 sticky top-0 z-10 border-b border-white/10",
+            bg,
+            "bg-opacity-80 backdrop-blur-md"
+          )}
+        >
           <div className="flex items-center justify-between">
             <div className="text-white/80 text-sm tracking-wide">21 · 1 на 1</div>
             <div className="text-white font-semibold">Баланс: {balance}</div>
@@ -727,16 +849,21 @@ export default function App() {
             {screen === "game" && GameScreen}
             {screen === "leaderboard" && LeaderboardScreen}
             {screen === "profile" && ProfileScreen}
+            {screen === "partners" && PartnersScreen}
           </div>
         </div>
 
-        {/* Bottom Nav — скрыт на ставке и в игре */}
+        {/* Bottom Nav (4 вкладки) — скрыт на ставке и в игре */}
         {screen !== "game" && screen !== "bet" && (
           <nav
-            className={cn("fixed bottom-0 left-0 right-0 z-50 border-t border-white/10", bg, "bg-opacity-80 backdrop-blur-md")}
+            className={cn(
+              "fixed bottom-0 left-0 right-0 z-50 border-t border-white/10",
+              bg,
+              "bg-opacity-80 backdrop-blur-md"
+            )}
             style={{ paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}
           >
-            <div className="max-w-md mx-auto grid grid-cols-3 gap-2 p-2">
+            <div className="max-w-md mx-auto grid grid-cols-4 gap-2 p-2">
               <NavButton
                 label="Меню"
                 icon={<Gamepad2 size={18} />}
@@ -755,6 +882,12 @@ export default function App() {
                 active={screen === "profile"}
                 onClick={() => setScreen("profile")}
               />
+              <NavButton
+                label="Партнёры"
+                icon={<span className="font-semibold">₽</span>}
+                active={screen === "partners"}
+                onClick={() => setScreen("partners")}
+              />
             </div>
           </nav>
         )}
@@ -763,7 +896,7 @@ export default function App() {
   );
 }
 
-/* ============ Nav Button ============ */
+/* =================== Nav Button =================== */
 function NavButton({
   label,
   icon,
@@ -775,11 +908,11 @@ function NavButton({
   active?: boolean;
   onClick?: () => void;
 }) {
-  const cn = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ");
+  const cnx = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ");
   return (
     <button
       onClick={onClick}
-      className={cn(
+      className={cnx(
         "h-12 rounded-2xl flex items-center justify-center gap-2 border text-sm transition-colors",
         "border-white/10 text-white bg-white/5 hover:bg-white/10 backdrop-blur-md shadow-[0_10px_40px_-20px_rgba(0,0,0,.6)]",
         active && "bg-neutral-700 ring-2 ring-[#2176ff]/40"
@@ -789,39 +922,4 @@ function NavButton({
       <span>{label}</span>
     </button>
   );
-}
-
-/* ============ server history aggregator (optional) ============ */
-function aggregateServerHistory(
-  raw: Array<{ roundId: string; userId: string; type: "bet" | "win"; amount: number; ts: number }>
-): UIHistoryItem[] {
-  const byRound = new Map<string, { bet?: number; win?: number; ts: number }>();
-  for (const x of raw) {
-    const m = byRound.get(x.roundId) || { ts: x.ts };
-    if (x.type === "bet") m.bet = x.amount;
-    if (x.type === "win") m.win = x.amount;
-    m.ts = Math.max(m.ts, x.ts);
-    byRound.set(x.roundId, m);
-  }
-  const out: UIHistoryItem[] = [];
-  for (const [rid, v] of byRound) {
-    const bet = v.bet ?? 0;
-    const win = v.win ?? 0;
-    let result: "win" | "lose" | "push" = "lose";
-    if (win === bet && win > 0) result = "push";
-    else if (win > bet) result = "win";
-    else if (win === 0) result = "lose";
-    out.push({ id: rid, when: new Date(v.ts).toLocaleString(), bet, result });
-  }
-  // свежие сверху
-  out.sort((a, b) => (a.when < b.when ? 1 : -1));
-  return out.slice(0, 50);
-}
-
-// слияние без дублей по id
-function mergeNoDups(current: UIHistoryItem[], incoming: UIHistoryItem[]): UIHistoryItem[] {
-  const seen = new Set(current.map((x) => x.id));
-  const merged = [...current];
-  for (const x of incoming) if (!seen.has(x.id)) merged.push(x);
-  return merged.sort((a, b) => (a.when < b.when ? 1 : -1)).slice(0, 50);
 }
