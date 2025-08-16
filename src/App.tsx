@@ -262,6 +262,9 @@ export default function App() {
   const BET_SECONDS = 10;
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
+  // DEV пополнение (добавлено)
+  const [devAmount, setDevAmount] = useState<number>(500);
+
   const pVal = useMemo(() => handValue(player), [player]);
   const dVal = useMemo(() => handValue(dealer), [dealer]);
 
@@ -498,6 +501,17 @@ export default function App() {
 
   function nextRound() {
     openBetStage();
+  }
+
+  // ==== DEV: пополнение через бэкенд (кнопки + поле суммы) ====
+  async function doDevTopup() {
+    try {
+      const r = await topup(userId, Math.max(1, Number(devAmount) || 0));
+      setBalance(r.balance);
+      loadLeaderboard();
+    } catch (e: any) {
+      alert(e?.message || "Ошибка пополнения");
+    }
   }
 
   /* =================== Screens =================== */
@@ -768,6 +782,38 @@ export default function App() {
           ))}
         </div>
       </div>
+
+      {/* === DEV-пополнение (через бэк). Видно в DEV или если VITE_DEV_TOOLS=true === */}
+      {(import.meta.env.DEV || (import.meta as any).env?.VITE_DEV_TOOLS === "true") && (
+        <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
+          <div className="text-white/90 font-medium mb-2">DEV-пополнение</div>
+          <div className="flex flex-wrap items-center gap-2">
+            {[100, 500, 1000, 2500].map((v) => (
+              <Button
+                key={v}
+                onClick={async () => {
+                  const r = await topup(userId, v);
+                  setBalance(r.balance);
+                  loadLeaderboard();
+                }}
+              >
+                +{v}
+              </Button>
+            ))}
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                value={devAmount}
+                onChange={(e) => setDevAmount(Number(e.target.value))}
+                className="w-28 h-10 px-3 rounded-xl bg-[#0f1723] border border-white/10 text-white/90 outline-none"
+                placeholder="сумма"
+              />
+              <Button onClick={doDevTopup}>Пополнить</Button>
+            </div>
+          </div>
+          <div className="text-xs text-white/50 mt-2">* Только для разработки</div>
+        </div>
+      )}
     </div>
   );
 

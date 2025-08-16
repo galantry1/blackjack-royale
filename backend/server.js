@@ -1,195 +1,222 @@
-// server.js
-const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const fs = require("fs");
-const path = require("path");
+// backend/server.js (ESM)
+import express from "express";
+import cors from "cors";
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = process.env.PORT || 3001;
-
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-const dataDir = __dirname;
-const balancesFile = path.join(dataDir, "balances.json");
-const historyFile  = path.join(dataDir, "history.json");
-const profilesFile = path.join(dataDir, "profiles.json"); // ref: { [userId]: { refCode, invitedBy } }
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+const HOST = process.env.HOST || "0.0.0.0";
 
-function ensureFiles() {
-  if (!fs.existsSync(balancesFile)) fs.writeFileSync(balancesFile, "{}", "utf8");
-  if (!fs.existsSync(historyFile))  fs.writeFileSync(historyFile,  "[]", "utf8");
-  if (!fs.existsSync(profilesFile)) fs.writeFileSync(profilesFile, "{}", "utf8");
+const DATA_DIR = path.join(__dirname, "data");
+const FILES = {
+  balances: path.join(DATA_DIR, "balances.json"),
+  history: path.join(DATA_DIR, "history.json"),
+  refs: path.join(DATA_DIR, "refs.json")
+};
+
+const START_BALANCE = 1000;
+const REF_BONUS = 0.05;
+
+async function ensureDir() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  try { await fs.access(FILES.balances); } catch { await fs.writeFile(FILES.balances, JSON.stringify({}, null, 2)); }
+  try { await fs.access(FILES.history); }  catch { await fs.writeFile(FILES.history,  JSON.stringify([], null, 2)); }
+  try { await fs.access(FILES.refs); }     catch { await fs.writeFile(FILES.refs,     JSON.stringify({ codes:{}, refOf:{} }, null, 2)); }
 }
-function readJSON(p, fallback) {
-  ensureFiles();
-  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fallback; }
+
+async function readJSON(file, fallback) {
+  try { return JSON.parse(await fs.readFile(file, "utf8")); }
+  catch (e) { if (e.code === "ENOENT") return fallback; throw e; }
 }
-function writeJSON(p, x) { fs.writeFileSync(p, JSON.stringify(x, null, 2), "utf8"); }
+async function writeJSON(file, obj) {
+  await fs.writeFile(file, JSON.stringify(obj, null, 2));
+}
 
-const now = () => Date.now();
-const rnd = (n) => Math.floor(Math.random() * n);
-const makeRefCode = (userId) => (userId.replace(/[^a-z0-9_]/gi,"").slice(0,8) + rnd(1e6)).toLowerCase();
+function now() { return Date.now(); }
+function isPosInt(n) { return Number.isFinite(n) && n > 0; }
 
-app.get("/health", (_, res) => res.json({ ok: true }));
+function baseUrl(req) {
+  const proto = req.headers["x-forwarded-proto"] || req.protocol;
+  const host  = req.headers["x-forwarded-host"]  || req.get("host");
+  return `${proto}://${host}`;
+}
 
-// ---------- Auth/Init ----------
-app.post("/init", (req, res) => {
-  const { userId } = req.body || {};
-  if (!userId) return res.status(400).json({ success: false, message: "userId required" });
+/* ---------- routes ---------- */
 
-  const balances = readJSON(balancesFile, {});
-  const profiles = readJSON(profilesFile, {});
+app.get("/health", (_req, res) => res.send("ok"));
 
-  if (balances[userId] == null) balances[userId] = 1000; // стартовый баланс
-  if (!profiles[userId]) profiles[userId] = { refCode: makeRefCode(userId), invitedBy: null };
+app.get("/init", async (req, res) => {
+  const userId = String(req.query.userId || "");
+  if (!userId) return res.status(400).json({ message: "userId required" });
 
-  writeJSON(balancesFile, balances);
-  writeJSON(profilesFile, profiles);
-  res.json({ success: true, balance: balances[userId] });
+  await ensureDir();
+  const balances = await readJSON(FILES.balances, {});
+  let created = false;
+  if (!(userId in balances)) { balances[userId] = START_BALANCE; created = true; await writeJSON(FILES.balances, balances); }
+  res.json({ created });
 });
 
-app.get("/balance/:userId", (req, res) => {
-  const balances = readJSON(balancesFile, {});
-  res.json({ success: true, balance: balances[req.params.userId] ?? 0 });
+app.get("/balance", async (req, res) => {
+  const userId = String(req.query.userId || "");
+  if (!userId) return res.status(400).json({ message: "userId required" });
+
+  await ensureDir();
+  const balances = await readJSON(FILES.balances, {});
+  res.json({ balance: balances[userId] ?? 0 });
 });
 
-app.get("/history/:userId", (req, res) => {
-  const all = readJSON(historyFile, []);
-  const list = all.filter(x => x.userId === req.params.userId)
-                  .sort((a,b) => b.ts - a.ts)
-                  .slice(0, 300);
-  res.json({ success: true, history: list });
+app.get("/history", async (req, res) => {
+  const userId = String(req.query.userId || "");
+  if (!userId) return res.status(400).json({ message: "userId required" });
+
+  await ensureDir();
+  const history = await readJSON(FILES.history, []);
+  res.json({ history: history.filter(h => h.userId === userId) });
 });
 
-// ---------- Gameplay: bet/win (идемпотентно по roundId+type) ----------
-app.post("/bet", (req, res) => {
+// идемпотентная ставка
+app.post("/bet", async (req, res) => {
   const { userId, amount, roundId } = req.body || {};
-  if (!userId || !Number.isFinite(amount) || amount <= 0 || !roundId)
-    return res.status(400).json({ success: false, message: "userId, amount>0, roundId required" });
+  if (!userId || !isPosInt(Number(amount)) || !roundId)
+    return res.status(400).json({ success:false, message:"userId, amount, roundId required" });
 
-  const balances = readJSON(balancesFile, {});
-  const history  = readJSON(historyFile, []);
+  await ensureDir();
+  const balances = await readJSON(FILES.balances, {});
+  const history  = await readJSON(FILES.history, []);
 
-  const exists = history.find(h => h.userId===userId && h.roundId===roundId && h.type==="bet");
-  if (exists) return res.json({ success: true, message: "already bet", balance: balances[userId] ?? 0 });
+  if (history.find(h => h.userId===userId && h.roundId===roundId && h.type==="bet"))
+    return res.json({ success:true, balance: balances[userId] ?? 0 });
 
   const bal = balances[userId] ?? 0;
-  if (bal < amount) return res.status(400).json({ success: false, message: "Недостаточно средств", balance: bal });
+  if (bal < amount) return res.status(400).json({ success:false, message:"Недостаточно средств" });
 
-  balances[userId] = bal - amount;
-  history.push({ userId, roundId, type: "bet", amount, ts: now() });
+  balances[userId] = bal - Number(amount);
+  history.push({ userId, roundId, type:"bet", amount:Number(amount), ts:now() });
 
-  writeJSON(balancesFile, balances);
-  writeJSON(historyFile, history);
-  res.json({ success: true, balance: balances[userId] });
-});
-
-app.post("/win", (req, res) => {
-  const { userId, amount, roundId } = req.body || {};
-  if (!userId || !Number.isFinite(amount) || amount < 0 || !roundId)
-    return res.status(400).json({ success: false, message: "userId, amount>=0, roundId required" });
-
-  const balances = readJSON(balancesFile, {});
-  const history  = readJSON(historyFile, []);
-
-  const exists = history.find(h => h.userId===userId && h.roundId===roundId && h.type==="win");
-  if (exists) return res.json({ success: true, message: "already settled", balance: balances[userId] ?? 0 });
-
-  balances[userId] = (balances[userId] ?? 0) + amount;
-  history.push({ userId, roundId, type: "win", amount, ts: now() });
-
-  writeJSON(balancesFile, balances);
-  writeJSON(historyFile, history);
-  res.json({ success: true, balance: balances[userId] });
-});
-
-// ---------- Leaderboard ----------
-function computeLeaderboard(metric="wins", limit=20) {
-  const hist = readJSON(historyFile, []);
-  const rounds = new Map(); // key = userId::roundId -> {bet, win}
-  for (const h of hist) {
-    const key = `${h.userId}::${h.roundId}`;
-    const acc = rounds.get(key) || { userId: h.userId, bet: 0, win: 0 };
-    if (h.type === "bet") acc.bet = h.amount;
-    if (h.type === "win") acc.win = h.amount;
-    rounds.set(key, acc);
-  }
-  const byUser = new Map();
-  for (const r of rounds.values()) {
-    const u = byUser.get(r.userId) || { userId: r.userId, wins:0, losses:0, pushes:0, profit:0, rounds:0, wagered:0 };
-    u.rounds += 1;
-    u.wagered += r.bet || 0;
-    if (!r.win && r.bet) { u.losses++; u.profit -= r.bet; }
-    else if (r.win === r.bet && r.bet>0) { u.pushes++; }
-    else if (r.win > r.bet) { u.wins++; u.profit += (r.win - r.bet); }
-    byUser.set(r.userId, u);
-  }
-  let arr = Array.from(byUser.values());
-  if (metric === "profit") arr.sort((a,b) => b.profit - a.profit || b.wins - a.wins);
-  else arr.sort((a,b) => b.wins - a.wins || b.profit - a.profit);
-  return arr.slice(0, limit);
-}
-
-app.get("/leaderboard", (req, res) => {
-  const metric = (req.query.metric === "profit") ? "profit" : "wins";
-  const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit || "20", 10)));
-  res.json({ ok: true, metric, entries: computeLeaderboard(metric, limit), updatedAt: now() });
-});
-
-// ---------- Referrals MVP ----------
-app.get("/ref/link/:userId", (req, res) => {
-  const { userId } = req.params;
-  const origin = (req.query.origin || "").toString(); // для веб-версии
-  const profiles = readJSON(profilesFile, {});
-  const p = profiles[userId] || { refCode: makeRefCode(userId), invitedBy: null };
-  profiles[userId] = p;
-  writeJSON(profilesFile, profiles);
-
-  // веб-ссылка (для Vercel сайта)
-  const web = origin ? `${origin}/?ref=${encodeURIComponent(p.refCode)}` : null;
-  // телега (подставь своего бота)
-  const bot = process.env.TG_BOT || "your_bot_name";
-  const tg = `https://t.me/${bot}?startapp=${encodeURIComponent(p.refCode)}`;
-  res.json({ success: true, code: p.refCode, web, telegram: tg });
-});
-
-// связать реферала вручную (если пришёл с ref=?)
-app.post("/ref/apply", (req, res) => {
-  const { userId, code } = req.body || {};
-  if (!userId || !code) return res.status(400).json({ success:false, message:"userId & code required" });
-  const profiles = readJSON(profilesFile, {});
-  const inviter = Object.entries(profiles).find(([_, v]) => v.refCode === code);
-  if (!inviter) return res.status(404).json({ success:false, message:"ref code not found" });
-  if (!profiles[userId]) profiles[userId] = { refCode: makeRefCode(userId), invitedBy: null };
-  profiles[userId].invitedBy = inviter[0];
-  writeJSON(profilesFile, profiles);
-  res.json({ success:true, invitedBy: inviter[0] });
-});
-
-// пополнение (для тестов/демо). Начисляет 5% рефереру.
-app.post("/topup", (req, res) => {
-  const { userId, amount } = req.body || {};
-  if (!userId || !Number.isFinite(amount) || amount <= 0)
-    return res.status(400).json({ success:false, message:"userId & amount>0 required" });
-
-  const balances = readJSON(balancesFile, {});
-  const profiles = readJSON(profilesFile, {});
-  const history  = readJSON(historyFile, []);
-
-  balances[userId] = (balances[userId] ?? 0) + amount;
-  history.push({ userId, roundId: `topup_${now()}`, type:"win", amount, ts: now(), meta:"topup" });
-
-  const invitedBy = profiles[userId]?.invitedBy;
-  if (invitedBy) {
-    const bonus = Math.floor(amount * 0.05);
-    balances[invitedBy] = (balances[invitedBy] ?? 0) + bonus;
-    history.push({ userId: invitedBy, roundId:`ref_${userId}_${now()}`, type:"win", amount: bonus, ts: now(), meta:"ref_bonus" });
-  }
-
-  writeJSON(balancesFile, balances);
-  writeJSON(historyFile, history);
+  await writeJSON(FILES.balances, balances);
+  await writeJSON(FILES.history, history);
   res.json({ success:true, balance: balances[userId] });
 });
 
-app.listen(PORT, () => console.log(`✅ Backend running on ${PORT}`));
+// идемпотентное начисление
+app.post("/win", async (req, res) => {
+  const { userId, amount, roundId } = req.body || {};
+  if (!userId || !isPosInt(Number(amount)) || !roundId)
+    return res.status(400).json({ success:false, message:"userId, amount, roundId required" });
+
+  await ensureDir();
+  const balances = await readJSON(FILES.balances, {});
+  const history  = await readJSON(FILES.history, []);
+
+  if (history.find(h => h.userId===userId && h.roundId===roundId && h.type==="win"))
+    return res.json({ success:true, balance: balances[userId] ?? 0 });
+
+  balances[userId] = (balances[userId] ?? 0) + Number(amount);
+  history.push({ userId, roundId, type:"win", amount:Number(amount), ts:now() });
+
+  await writeJSON(FILES.balances, balances);
+  await writeJSON(FILES.history, history);
+  res.json({ success:true, balance: balances[userId] });
+});
+
+// лидерборд
+app.get("/leaderboard", async (req, res) => {
+  const metric = req.query.metric === "profit" ? "profit" : "wins";
+  const limit  = Math.max(1, Math.min(200, Number(req.query.limit) || 20));
+
+  await ensureDir();
+  const history = await readJSON(FILES.history, []);
+
+  const byRound = new Map(); // key: userId|roundId -> {bet, win}
+  for (const h of history) {
+    const key = `${h.userId}|${h.roundId}`;
+    const obj = byRound.get(key) || { bet:0, win:0 };
+    if (h.type === "bet") obj.bet = h.amount;
+    if (h.type === "win") obj.win = h.amount;
+    byRound.set(key, obj);
+  }
+
+  const agg = new Map(); // userId -> {wins, profit}
+  for (const [key, v] of byRound) {
+    const userId = key.split("|")[0];
+    const u = agg.get(userId) || { userId, wins:0, profit:0 };
+    const diff = (v.win || 0) - (v.bet || 0);
+    if ((v.win || 0) > (v.bet || 0)) u.wins += 1;
+    u.profit += diff;
+    agg.set(userId, u);
+  }
+
+  let arr = Array.from(agg.values());
+  arr.sort((a,b) => metric === "wins" ? b.wins - a.wins : b.profit - a.profit);
+  res.json({ entries: arr.slice(0, limit) });
+});
+
+// партнёрка
+app.get("/ref-link", async (req, res) => {
+  const userId = String(req.query.userId || "");
+  if (!userId) return res.status(400).json({ message: "userId required" });
+
+  await ensureDir();
+  const refs = await readJSON(FILES.refs, { codes:{}, refOf:{} });
+
+  let code = refs.codes[userId];
+  if (!code) {
+    code = Math.random().toString(36).slice(2, 10);
+    refs.codes[userId] = code;
+    await writeJSON(FILES.refs, refs);
+  }
+  const web = `${baseUrl(req)}?ref=${encodeURIComponent(code)}`;
+  const telegram = `https://t.me/your_bot?startapp=${encodeURIComponent(code)}`;
+  res.json({ web, telegram });
+});
+
+app.post("/apply-ref", async (req, res) => {
+  const { userId, code } = req.body || {};
+  if (!userId || !code) return res.status(400).json({ message:"userId, code required" });
+
+  await ensureDir();
+  const refs = await readJSON(FILES.refs, { codes:{}, refOf:{} });
+
+  if (refs.refOf[userId]) return res.json({ applied:false });
+  const owner = Object.keys(refs.codes).find(u => refs.codes[u] === code);
+  if (!owner || owner === userId) return res.json({ applied:false });
+
+  refs.refOf[userId] = owner;
+  await writeJSON(FILES.refs, refs);
+  res.json({ applied:true });
+});
+
+// тестовое пополнение + 5% реф
+app.post("/topup", async (req, res) => {
+  const { userId, amount } = req.body || {};
+  if (!userId || !isPosInt(Number(amount)))
+    return res.status(400).json({ success:false, message:"userId, amount required" });
+
+  await ensureDir();
+  const balances = await readJSON(FILES.balances, {});
+  const refs = await readJSON(FILES.refs, { codes:{}, refOf:{} });
+
+  balances[userId] = (balances[userId] ?? 0) + Number(amount);
+
+  const referrer = refs.refOf[userId];
+  if (referrer) {
+    const bonus = Math.floor(Number(amount) * 0.05);
+    if (bonus > 0) balances[referrer] = (balances[referrer] ?? 0) + bonus;
+  }
+
+  await writeJSON(FILES.balances, balances);
+  res.json({ success:true, balance: balances[userId] });
+});
+
+/* ---------- start ---------- */
+ensureDir().then(() => {
+  app.listen(PORT, HOST, () => {
+    console.log(`API listening on http://${HOST}:${PORT}`);
+  });
+});
