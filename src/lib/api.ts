@@ -1,105 +1,75 @@
 // src/lib/api.ts
-type Json = Record<string, any>;
+export type LeaderboardRow = { userId: string; wins: number; profit: number };
 
-const API = (
-  (import.meta as any).env?.VITE_API_URL as string ||
-  "https://blackjack-royale-backend.onrender.com"
-).replace(/\/$/, ""); // без хвостового слэша
+// Базовый URL бэка из .env (VITE_API_URL=https://blackjack-royale-backend.onrender.com)
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+const url = (p: string) => `${BASE}${p}`;
 
-async function request<T = any>(
-  path: string,
-  opts: RequestInit & { body?: any } = {}
-): Promise<T> {
-  const url = `${API}${path.startsWith("/") ? path : `/${path}`}`;
-  const headers: HeadersInit = {
-    "Content-Type": "application/json",
-    ...(opts.headers || {}),
-  };
-  const res = await fetch(url, {
-    ...opts,
-    headers,
-    body: opts.body != null ? JSON.stringify(opts.body) : undefined,
-  });
-  const text = await res.text();
-  let data: any = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    // не JSON — вернём как есть
-    data = text;
-  }
+// Универсальный JSON-фетчер
+async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+  const res = await fetch(input, init);
   if (!res.ok) {
-    const msg =
-      (data && (data.message || data.error)) ||
-      `HTTP ${res.status} ${res.statusText}`;
-    throw new Error(msg);
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}${text ? ` – ${text}` : ""}`);
   }
-  return data as T;
+  return res.json() as Promise<T>;
 }
 
-/* ==== API ==== */
-
-export async function initUser(userId: string) {
-  return request<{ ok: true }>("/init", { method: "POST", body: { userId } });
-}
-
-export async function getBalance(userId: string) {
-  return request<{ balance: number }>("/balance", {
+// Удобный POST с JSON
+function post<T>(path: string, body: unknown): Promise<T> {
+  return fetchJson<T>(url(path), {
     method: "POST",
-    body: { userId },
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 }
 
-export async function getHistory(userId: string) {
-  return request<{ history: Array<{ roundId: string; userId: string; type: "bet" | "win"; amount: number; ts: number }>}>(
-    "/history",
-    { method: "POST", body: { userId } }
-  );
+/* ======= API ======= */
+
+// Создать/инициализировать пользователя
+export function initUser(userId: string) {
+  return post<{ ok: boolean }>("/init", { userId });
 }
 
-export async function bet(userId: string, amount: number, roundId: string) {
-  return request<{ success: boolean; balance: number; message?: string }>(
-    "/bet",
-    { method: "POST", body: { userId, amount, roundId } }
-  );
+// Баланс пользователя
+export function getBalance(userId: string) {
+  return post<{ balance: number }>("/balance", { userId });
 }
 
-export async function win(userId: string, amount: number, roundId: string) {
-  return request<{ success: boolean; balance: number }>(
-    "/win",
-    { method: "POST", body: { userId, amount, roundId } }
-  );
+// История (сырая серверная, если нужна для агрегации)
+export function getHistory(userId: string) {
+  return post<{
+    history: Array<{ roundId: string; userId: string; type: "bet" | "win"; amount: number; ts: number }>;
+  }>("/history", { userId });
 }
 
-export type LeaderboardRow = {
-  userId: string;
-  wins: number;
-  profit: number;
-};
-export async function getLeaderboard(metric: "wins" | "profit", limit = 20) {
-  return request<{ entries: LeaderboardRow[] }>(
-    "/leaderboard",
-    { method: "POST", body: { metric, limit } }
-  );
+// Ставка
+export function bet(userId: string, amount: number, roundId: string) {
+  return post<{ success: boolean; balance: number; message?: string }>("/bet", { userId, amount, roundId });
 }
 
-export async function getRefLink(userId: string) {
-  return request<{ web: string; telegram: string }>(
-    "/ref/link",
-    { method: "POST", body: { userId } }
-  );
+// Начисление выигрыша/возврата
+export function win(userId: string, amount: number, roundId: string) {
+  return post<{ success: boolean; balance: number }>("/win", { userId, amount, roundId });
 }
 
-export async function applyRef(userId: string, code: string) {
-  return request<{ ok: true }>(
-    "/ref/apply",
-    { method: "POST", body: { userId, code } }
-  );
+// Лидерборд
+export function getLeaderboard(metric: "wins" | "profit" = "wins", limit = 20) {
+  const qs = new URLSearchParams({ metric, limit: String(limit) });
+  return fetchJson<{ entries: LeaderboardRow[] }>(url(`/leaderboard?${qs.toString()}`));
 }
 
-export async function topup(userId: string, amount: number) {
-  return request<{ balance: number }>(
-    "/topup",
-    { method: "POST", body: { userId, amount } }
-  );
+// Партнёрка — получить персональную ссылку
+export function getRefLink(userId: string) {
+  return post<{ web: string; telegram: string }>("/ref/link", { userId });
+}
+
+// Партнёрка — применить реф-код
+export function applyRef(userId: string, code: string) {
+  return post<{ ok: boolean }>("/ref/apply", { userId, code });
+}
+
+// DEV пополнение (для теста)
+export function topup(userId: string, amount: number) {
+  return post<{ balance: number }>("/topup", { userId, amount });
 }
