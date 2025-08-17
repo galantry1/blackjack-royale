@@ -1,4 +1,4 @@
-// backend/server.js (CommonJS)
+// backend/server.cjs (CommonJS)
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -30,10 +30,11 @@ const refs = readJSON(REF_PATH);     // { code: inviterUserId }
 
 // helper
 function ensureUser(userId) {
-  if (!balances[userId]) balances[userId] = 1000; // старт, только 1 раз
+  if (balances[userId] == null) balances[userId] = 1000; // старт для новых
 }
 function saveBalances() { writeJSON(BAL_PATH, balances); }
 function saveHistory() { writeJSON(HIS_PATH, history); }
+function saveRefs() { writeJSON(REF_PATH, refs); }
 
 // idемпотентность: есть ли запись про этот раунд/тип
 function hasHistory(userId, roundId, type) {
@@ -119,14 +120,29 @@ app.post("/topup", (req, res) => {
 app.post("/reflink", (req, res) => {
   const { userId } = req.body || {};
   const base = process.env.WEB_BASE || "https://example.com";
-  const code = Buffer.from(userId).toString("base64").slice(0, 12);
+  const code = Buffer.from(String(userId || "")).toString("base64").slice(0, 12);
+  refs[code] = String(userId || "");
+  saveRefs();
   res.json({
     web: `${base}/?ref=${code}`,
     telegram: `https://t.me/your_bot?startapp=${code}`,
   });
 });
+// совместимость с /ref-link
+app.post("/ref-link", (req, res) => {
+  const { userId } = req.body || {};
+  const base = process.env.WEB_BASE || "https://example.com";
+  const code = Buffer.from(String(userId || "")).toString("base64").slice(0, 12);
+  refs[code] = String(userId || "");
+  saveRefs();
+  res.json({
+    web: `${base}/?ref=${code}`,
+    telegram: `https://t.me/your_bot?startapp=${code}`,
+  });
+});
+
 app.post("/apply-ref", (req, res) => {
-  // можно сохранять связку "приглашённый -> код"
+  // можно сохранять связку "приглашённый -> код", для MVP просто ok
   res.json({ success: true });
 });
 

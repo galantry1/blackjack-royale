@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Crown, User2, Gamepad2, Users2, History, Info } from "lucide-react";
 
+// ==== API (наш бэкенд) ====
 import {
   initUser,
   getBalance as apiGetBalance,
@@ -16,6 +17,7 @@ import {
 /* =================== Cards / Blackjack =================== */
 const SUITS = ["♠", "♥", "♦", "♣"] as const;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"] as const;
+
 type Card = { rank: typeof RANKS[number]; suit: typeof SUITS[number] };
 
 function createDeck() {
@@ -32,7 +34,7 @@ function cardValue(rank: string) {
   if (["K", "Q", "J"].includes(rank)) return 10;
   return parseInt(rank, 10);
 }
-function handValue(cards: Card[]) {
+function handValue(cards: { rank: string; suit: string }[]) {
   let total = 0;
   let aces = 0;
   for (const c of cards) {
@@ -66,11 +68,11 @@ const BLUE = "#2176ff";
 
 /* =================== helpers (id, round, payout) =================== */
 
-// стабильный userId: tg_<id> или guest_<persist>
+// берём id из Telegram, иначе постоянный guest_<uuid> в localStorage
 function uid(): string {
   const tgId = (window as any)?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
   if (tgId) return `tg_${tgId}`;
-  const key = "guest_id_v2";
+  const key = "guest_id_v1";
   let g = localStorage.getItem(key);
   if (!g) {
     const r = (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
@@ -79,15 +81,18 @@ function uid(): string {
   }
   return g;
 }
+
 const newRoundId = () =>
   (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
 
+// твои правила выплат
 const PAYOUT = {
-  win: (stake: number) => Math.floor(stake * 1.9),
-  push: (stake: number) => stake,
+  win: (stake: number) => Math.floor(stake * 1.9), // комиссия 10%
+  push: (stake: number) => stake, // возврат ставки
 };
 
 /* =================== Малые UI-атомы =================== */
+
 const Button: React.FC<
   React.ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean; size?: "lg" | "md" | "sm" }
 > = ({ className, active, size = "md", ...props }) => (
@@ -168,29 +173,27 @@ const ShuffleDeck = () => (
   </>
 );
 
-/* ============ Live Ticker (плавная полоса) ============ */
+/* ============ Live Ticker (полоса пополнений) ============ */
 const LiveTicker: React.FC = () => {
-  const seed = React.useMemo(
-    () =>
-      Array.from({ length: 24 }, (_, i) => ({
-        id: `seed_${i}`,
-        amount: [40, 80, 120, 200, 40, 80, 160, 60][i % 8],
-      })),
-    []
+  const [items, setItems] = useState<{ id: string; amount: number }[]>(
+    () => Array.from({ length: 16 }, (_, i) => ({ id: `init_${i}`, amount: [40, 80, 120, 200, 60, 90, 150, 240][i % 8] }))
   );
 
-  // раз в 12s, когда цикл «уехал», добавим пачку в конец (за кадром)
   useEffect(() => {
     const t = setInterval(() => {
-      seed.push(
-        ...Array.from({ length: 8 }, () => ({
-          id: Math.random().toString(36).slice(2),
-          amount: [40, 40, 80, 120, 200, 60][Math.floor(Math.random() * 6)],
-        }))
-      );
-    }, 12000);
+      setItems((prev) => {
+        const next = [
+          ...prev.slice(1),
+          {
+            id: (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2),
+            amount: [40, 60, 80, 120, 160, 200, 240][Math.floor(Math.random() * 7)],
+          },
+        ];
+        return next;
+      });
+    }, 1600);
     return () => clearInterval(t);
-  }, [seed]);
+  }, []);
 
   return (
     <div className="px-3 mt-2">
@@ -198,28 +201,18 @@ const LiveTicker: React.FC = () => {
         <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Live
       </div>
       <div className="overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-        <div className="relative">
-          <div className="flex gap-2 px-2 py-2 animate-[marq_14s_linear_infinite] will-change-transform">
-            {seed.map((it) => (
-              <div
-                key={it.id}
-                className="px-4 py-2 rounded-xl border border-white/10 bg-[#0f1723] text-amber-300 font-semibold"
-              >
-                +{it.amount}
-              </div>
-            ))}
-            {seed.map((it) => (
-              <div
-                key={`${it.id}_dup`}
-                className="px-4 py-2 rounded-xl border border-white/10 bg-[#0f1723] text-amber-300 font-semibold"
-              >
-                +{it.amount}
-              </div>
-            ))}
-          </div>
-          <style>{`@keyframes marq{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}`}</style>
+        <div className="flex gap-2 animate-[ticker_14s_linear_infinite] px-2 py-2 will-change-transform">
+          {items.map((it) => (
+            <div
+              key={it.id}
+              className="px-4 py-2 rounded-xl border border-white/10 bg-[#0f1723] text-amber-300 font-semibold"
+            >
+              +{it.amount}
+            </div>
+          ))}
         </div>
       </div>
+      <style>{`@keyframes ticker{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}`}</style>
     </div>
   );
 };
@@ -229,8 +222,10 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("menu");
   const [userId, setUserId] = useState<string>("");
 
+  // баланс только с бэка
   const [balance, setBalance] = useState<number>(0);
 
+  // локальная история только для UI
   const [history, setHistory] = useState<UIHistoryItem[]>(() => {
     try {
       const raw = localStorage.getItem("history_v1");
@@ -243,6 +238,7 @@ export default function App() {
 
   const [bet, setBet] = useState(25);
 
+  // game state
   const [deck, setDeck] = useState(createDeck());
   const [player, setPlayer] = useState<Card[]>([]);
   const [dealer, setDealer] = useState<Card[]>([]);
@@ -250,34 +246,38 @@ export default function App() {
   const [revealed, setRevealed] = useState(false);
   const [roundResult, setRoundResult] = useState<Result>(null);
 
+  // текущий roundId и stake на сервере
   const [roundId, setRoundId] = useState<string | null>(null);
   const [stakeOnServer, setStakeOnServer] = useState<number>(0);
 
+  // leaderboard
   const [leaders, setLeaders] = useState<LeaderboardRow[] | null>(null);
   const [lbMetric, setLbMetric] = useState<"wins" | "profit">("wins");
 
+  // partners
   const [refLink, setRefLink] = useState<string>("");
 
+  // bet countdown
   const BET_SECONDS = 10;
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
   const pVal = useMemo(() => handValue(player), [player]);
   const dVal = useMemo(() => handValue(dealer), [dealer]);
 
+  /* ======== Persistence (save history only) ======== */
   useEffect(() => {
     try {
       localStorage.setItem("history_v1", JSON.stringify(history));
     } catch {}
   }, [history]);
 
-  // первый запуск
+  /* ======== Init from backend ======== */
   useEffect(() => {
     const id = uid();
     setUserId(id);
-
     (async () => {
       try {
-        await initUser(id); // только создаёт, не перезаписывает
+        await initUser(id); // стартовый баланс для гостя/нового юзера
         const b = await apiGetBalance(id);
         setBalance(b.balance);
       } catch (e) {
@@ -285,12 +285,15 @@ export default function App() {
       }
     })();
 
+    // если пришли по реф-ссылке ?ref=CODE — привязываем (без жёстких ошибок)
     const url = new URL(window.location.href);
     const ref = url.searchParams.get("ref");
     if (ref) applyRef(id, ref).catch(() => {});
 
-    loadLeaderboard("wins");
+    // лидерборд
+    loadLeaderboard("wins").catch(() => {});
 
+    // партнёрская ссылка
     getRefLink(id)
       .then((r) => setRefLink(r.web || r.telegram))
       .catch(() => {});
@@ -316,6 +319,7 @@ export default function App() {
     }
   }
 
+  /* ======== Helpers ======== */
   function resetGameState() {
     setPlayer([]);
     setDealer([]);
@@ -343,10 +347,12 @@ export default function App() {
     setRoundResult(null);
   }
 
+  /* ======== Bet flow ======== */
   function openBetStage() {
     setSecondsLeft(BET_SECONDS);
     setScreen("bet");
   }
+  // countdown
   useEffect(() => {
     if (screen !== "bet" || secondsLeft == null) return;
     if (secondsLeft <= 0) {
@@ -365,6 +371,7 @@ export default function App() {
     }
     const rId = newRoundId();
     try {
+      // списание на сервере
       const res = await apiBet(userId, bet, rId);
       if (!res.success) {
         alert(res.message || "Не удалось сделать ставку");
@@ -374,6 +381,7 @@ export default function App() {
       setRoundId(rId);
       setStakeOnServer(bet);
 
+      // локально запускаем сам раунд
       startRoundFromDeck(false);
       setScreen("game");
       setSecondsLeft(null);
@@ -382,6 +390,7 @@ export default function App() {
     }
   }
 
+  /* ======== Menu actions ======== */
   function onPlay() {
     openBetStage();
   }
@@ -399,6 +408,7 @@ export default function App() {
     makeLobby();
   }
 
+  /* ======== Game controls ======== */
   function backFromGame() {
     goMenu();
   }
@@ -411,7 +421,7 @@ export default function App() {
     setDeck(d);
     setPlayer(next);
 
-    // если перебор — сразу передаём ход дилеру, запрещаем дальнейшие «взять»
+    // автостоп при переборе: ход переходит дилеру
     if (handValue(next) > 21) {
       setTurn("dealer");
     }
@@ -421,6 +431,7 @@ export default function App() {
     setTurn("dealer");
   }
 
+  // dealer auto play
   useEffect(() => {
     if (turn !== "dealer") return;
     const t = setTimeout(() => {
@@ -440,6 +451,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn]);
 
+  // end of round -> начисления на сервере + локальная история
   useEffect(() => {
     if (turn !== "end" || !roundId) return;
 
@@ -466,6 +478,7 @@ export default function App() {
         console.error("settle error:", e);
       }
 
+      // локальная UI-история
       const id = newRoundId();
       const item: UIHistoryItem = {
         id,
@@ -481,8 +494,9 @@ export default function App() {
       setRoundId(null);
       setStakeOnServer(0);
 
+      // обновим баланс и лидерборд
       refreshBalance();
-      loadLeaderboard();
+      loadLeaderboard().catch(() => {});
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn]);
@@ -730,6 +744,31 @@ export default function App() {
         <Pill>Баланс: {balance}</Pill>
       </div>
 
+      {/* Тестовое пополнение (+1000) с фоллбэком */}
+      <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
+        <div className="text-white/90 font-medium mb-2">Тестовое пополнение</div>
+        <div className="flex gap-2 flex-wrap">
+          <Button
+            onClick={async () => {
+              try {
+                const r = await topup(userId, 1000);
+                setBalance(r.balance);
+                alert("Баланс пополнен на +1000");
+                loadLeaderboard().catch(() => {});
+              } catch {
+                setBalance((b) => b + 1000);
+                alert("Бэкенд недоступен. Временное локальное +1000 для демонстрации.");
+              }
+            }}
+          >
+            +1000 (тест)
+          </Button>
+        </div>
+        <div className="text-white/50 text-xs mt-2">
+          * Если сервер недоступен, прибавление только в интерфейсе (для быстрых тестов).
+        </div>
+      </div>
+
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
         <div className="text-white/90 font-medium mb-2">История (локальная)</div>
         <div className="mt-3 space-y-2 max-h-60 overflow-auto pr-1">
@@ -791,9 +830,10 @@ export default function App() {
                 const t = await topup(userId, n);
                 setBalance(t.balance);
                 alert(`Баланс пополнен на ${n}`);
-                loadLeaderboard();
-              } catch (e: any) {
-                alert(e?.message || "Ошибка пополнения");
+                loadLeaderboard().catch(() => {});
+              } catch {
+                setBalance((b) => b + n);
+                alert("Бэкенд недоступен. Временное локальное пополнение для демонстрации.");
               }
             }}
           >
@@ -807,6 +847,7 @@ export default function App() {
     </div>
   );
 
+  /* =================== Root Layout =================== */
   return (
     <div
       className={cn("min-h-screen w-full", bg)}
@@ -816,6 +857,7 @@ export default function App() {
       }}
     >
       <div className="max-w-md mx-auto h-[100dvh] flex flex-col">
+        {/* Top Bar */}
         <div
           className={cn(
             "px-4 pt-4 pb-3 sticky top-0 z-10 border-b border-white/10",
@@ -829,6 +871,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Content */}
         <div
           className={cn(
             "flex-1 overflow-auto px-2",
@@ -845,6 +888,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Bottom Nav (4 вкладки) — скрыт на ставке и в игре */}
         {screen !== "game" && screen !== "bet" && (
           <nav
             className={cn(
@@ -887,6 +931,7 @@ export default function App() {
   );
 }
 
+/* =================== Nav Button =================== */
 function NavButton({
   label,
   icon,
