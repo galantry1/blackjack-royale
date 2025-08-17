@@ -1,90 +1,71 @@
-// Унифицированный клиент API с фоллбэком на Render
-const BASE =
-  (typeof import.meta !== "undefined" &&
-    (import.meta as any).env?.VITE_API_URL &&
-    String((import.meta as any).env.VITE_API_URL).trim()) ||
-  "https://blackjack-royale-backend.onrender.com";
+// src/lib/api.ts
+/* eslint-disable no-console */
 
 type Json = Record<string, any>;
 
-async function j<T = any>(path: string, init?: RequestInit & { body?: any }): Promise<T> {
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: { ...headers, ...(init?.headers as any) },
-    body: init?.body != null ? JSON.stringify(init.body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} — ${text || res.statusText}`);
-  }
-  return (await res.json()) as T;
-}
-
-// GET helper
-async function jGet<T = any>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} — ${text || res.statusText}`);
-  }
-  return (await res.json()) as T;
-}
-
-/* ============== API ============== */
-
-export async function initUser(userId: string): Promise<{ success: boolean; balance: number }> {
-  return j("/init", { method: "POST", body: { userId } });
-}
-
-export async function getBalance(userId: string): Promise<{ balance: number }> {
-  return j("/balance", { method: "POST", body: { userId } });
-}
-
-export async function bet(
-  userId: string,
-  amount: number,
-  roundId: string
-): Promise<{ success: boolean; balance: number; message?: string }> {
-  return j("/bet", { method: "POST", body: { userId, amount, roundId } });
-}
-
-export async function win(
-  userId: string,
-  winAmount: number,
-  roundId: string
-): Promise<{ success: boolean; balance: number; message?: string }> {
-  return j("/win", { method: "POST", body: { userId, winAmount, roundId } });
-}
-
 export type LeaderboardRow = { userId: string; wins: number; profit: number };
-export async function getLeaderboard(
-  metric: "wins" | "profit",
-  limit = 20
-): Promise<{ entries: LeaderboardRow[] }> {
-  return jGet(`/leaderboard?metric=${encodeURIComponent(metric)}&limit=${limit}`);
-}
 
-// на бэке маршрут называется /reflink — сделаем совместимость и с /ref-link
-export async function getRefLink(
-  userId: string
-): Promise<{ web: string; telegram: string }> {
-  try {
-    return await j("/reflink", { method: "POST", body: { userId } });
-  } catch {
-    return await j("/ref-link", { method: "POST", body: { userId } });
+const BASE = (() => {
+  const env = (import.meta as any)?.env?.VITE_API_URL?.trim();
+  const fallback =
+    location.hostname === "localhost" ? "http://localhost:3001" : "https://blackjack-royale-backend.onrender.com";
+  const url = (env || fallback).replace(/\/+$/, "");
+  console.log("[API] BASE =", url);
+  return url;
+})();
+
+async function handle<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} — ${text || res.statusText}`);
   }
+  return (await res.json()) as T;
 }
 
-export async function applyRef(userId: string, code: string): Promise<{ success: boolean }> {
-  try {
-    return await j("/apply-ref", { method: "POST", body: { userId, code } });
-  } catch {
-    // не критично — просто молча игнорируем
-    return { success: false };
-  }
+async function j<T>(path: string, data: Json): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  return handle<T>(res);
 }
 
-export async function topup(userId: string, amount: number): Promise<{ success: boolean; balance: number }> {
-  return j("/topup", { method: "POST", body: { userId, amount } });
+async function jGet<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`);
+  return handle<T>(res);
 }
+
+/* ========= API ========= */
+
+export const initUser = (userId: string) =>
+  j<{ success: boolean; balance: number }>("/init", { userId });
+
+export const getBalance = (userId: string) =>
+  j<{ balance: number }>("/balance", { userId });
+
+export const bet = (userId: string, amount: number, roundId: string) =>
+  j<{ success: boolean; balance: number; message?: string }>("/bet", {
+    userId,
+    amount,
+    roundId,
+  });
+
+export const win = (userId: string, winAmount: number, roundId: string) =>
+  j<{ success: boolean; balance: number; message?: string }>("/win", {
+    userId,
+    winAmount,
+    roundId,
+  });
+
+export const topup = (userId: string, amount: number) =>
+  j<{ success: boolean; balance: number }>("/topup", { userId, amount });
+
+export const getLeaderboard = (metric: "wins" | "profit" = "wins", limit = 20) =>
+  jGet<{ entries: LeaderboardRow[] }>(`/leaderboard?metric=${metric}&limit=${limit}`);
+
+export const getRefLink = (userId: string) =>
+  j<{ web: string; telegram: string }>("/reflink", { userId });
+
+export const applyRef = (userId: string, code: string) =>
+  j<{ success: boolean }>("/apply-ref", { userId, code });
