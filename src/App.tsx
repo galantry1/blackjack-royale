@@ -67,6 +67,12 @@ const cn = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ")
 const bg = "bg-[#0a0f14]";
 const BLUE = "#2176ff";
 
+// DEV-флаг: из ENV или по параметру ?dev=1
+const DEV =
+  String(import.meta.env.VITE_DEV_TOOLS) === "true" ||
+  (typeof window !== "undefined" &&
+    new URL(window.location.href).searchParams.get("dev") === "1");
+
 /* =================== helpers (id, round, payout) =================== */
 
 // берём id из Telegram, иначе постоянный guest_<uuid> в localStorage
@@ -202,7 +208,7 @@ const LiveTicker: React.FC = () => {
         <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Live
       </div>
       <div className="overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-        <div className="flex gap-2 animate-[ticker_12s_linear_infinite] px-2 py-2">
+        <div className="flex gap-2 px-2 py-2" style={{ animation: "ticker 12s linear infinite" }}>
           {items.map((it) => (
             <div
               key={it.id}
@@ -261,9 +267,6 @@ export default function App() {
   // bet countdown
   const BET_SECONDS = 10;
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
-
-  // DEV пополнение (добавлено)
-  const [devAmount, setDevAmount] = useState<number>(500);
 
   const pVal = useMemo(() => handValue(player), [player]);
   const dVal = useMemo(() => handValue(dealer), [dealer]);
@@ -501,17 +504,6 @@ export default function App() {
 
   function nextRound() {
     openBetStage();
-  }
-
-  // ==== DEV: пополнение через бэкенд (кнопки + поле суммы) ====
-  async function doDevTopup() {
-    try {
-      const r = await topup(userId, Math.max(1, Number(devAmount) || 0));
-      setBalance(r.balance);
-      loadLeaderboard();
-    } catch (e: any) {
-      alert(e?.message || "Ошибка пополнения");
-    }
   }
 
   /* =================== Screens =================== */
@@ -753,8 +745,60 @@ export default function App() {
         <Pill>Баланс: {balance}</Pill>
       </div>
 
+      {/* DEV-блоки (видно при VITE_DEV_TOOLS=true или ?dev=1) */}
+      {DEV && (
+        <>
+          {/* Локальные кнопки — меняют только UI, без сервера */}
+          <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
+            <div className="text-white/90 font-medium mb-2">Обмен (демо)</div>
+            <p className="text-white/60 text-sm">
+              Эти кнопки только для теста. Работают локально на UI (баланс на сервере не меняют).
+            </p>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              {[100, 500, 1000, 2500, 5000, 10000].map((v) => (
+                <Button key={v} onClick={() => setBalance((b) => b + v)}>{`+${v}`}</Button>
+              ))}
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-2">
+              {[100, 500, 1000, 2500].map((v) => (
+                <Button key={v} onClick={() => setBalance((b) => Math.max(0, b - v))}>{`-${v}`}</Button>
+              ))}
+            </div>
+            <div className="text-xs opacity-60 mt-2">
+              * Видно только при <code>VITE_DEV_TOOLS=true</code> или с параметром URL <code>?dev=1</code>.
+            </div>
+          </div>
+
+          {/* Тестовое пополнение через БЭКЕНД */}
+          <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
+            <div className="text-white/90 font-medium mb-2">Пополнение (бэкенд)</div>
+            <p className="text-white/60 text-sm">Отправляет запрос на /topup.</p>
+            <div className="mt-2 flex gap-2">
+              <Button
+                onClick={async () => {
+                  const r = prompt("Пополнить на сумму (например 200)");
+                  if (!r) return;
+                  const n = Number(r);
+                  if (!Number.isFinite(n) || n <= 0) return;
+                  const t = await topup(userId, n);
+                  setBalance(t.balance);
+                  alert(`Баланс пополнен на ${n}`);
+                  loadLeaderboard();
+                }}
+              >
+                Пополнить (сервер)
+              </Button>
+              <Button onClick={refreshBalance}>Обновить баланс</Button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* История (локальная) */}
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
-        <div className="text-white/90 font-medium mb-2">История (локальная)</div>
+        <div className="flex items-center gap-2 text-white/90 font-medium">
+          <History size={18} /> История игр
+        </div>
         <div className="mt-3 space-y-2 max-h-60 overflow-auto pr-1">
           {history.length === 0 && (
             <div className="text-white/60 text-sm flex items-center gap-3 p-3 border border-white/10 rounded-2xl bg-[#0f1723]">
@@ -782,38 +826,6 @@ export default function App() {
           ))}
         </div>
       </div>
-
-      {/* === DEV-пополнение (через бэк). Видно в DEV или если VITE_DEV_TOOLS=true === */}
-      {(import.meta.env.DEV || (import.meta as any).env?.VITE_DEV_TOOLS === "true") && (
-        <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
-          <div className="text-white/90 font-medium mb-2">DEV-пополнение</div>
-          <div className="flex flex-wrap items-center gap-2">
-            {[100, 500, 1000, 2500].map((v) => (
-              <Button
-                key={v}
-                onClick={async () => {
-                  const r = await topup(userId, v);
-                  setBalance(r.balance);
-                  loadLeaderboard();
-                }}
-              >
-                +{v}
-              </Button>
-            ))}
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                value={devAmount}
-                onChange={(e) => setDevAmount(Number(e.target.value))}
-                className="w-28 h-10 px-3 rounded-xl bg-[#0f1723] border border-white/10 text-white/90 outline-none"
-                placeholder="сумма"
-              />
-              <Button onClick={doDevTopup}>Пополнить</Button>
-            </div>
-          </div>
-          <div className="text-xs text-white/50 mt-2">* Только для разработки</div>
-        </div>
-      )}
     </div>
   );
 
