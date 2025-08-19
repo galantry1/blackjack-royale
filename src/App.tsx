@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Crown, User2, Gamepad2, Users2, History, Info } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Crown, User2, Gamepad2, Users2, Info } from "lucide-react";
 
 // ==== API (наш бэкенд) ====
 import {
@@ -12,7 +12,11 @@ import {
   getRefLink,
   topup,
   applyRef,
+  getTelegramUser,
 } from "./lib/api";
+
+// ==== Realtime (Socket.IO) ====
+import { io, Socket } from "socket.io-client";
 
 /* =================== Cards / Blackjack =================== */
 const SUITS = ["♠", "♥", "♦", "♣"] as const;
@@ -85,11 +89,19 @@ function uid(): string {
 const newRoundId = () =>
   (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
 
-// твои правила выплат
+// выплаты
 const PAYOUT = {
   win: (stake: number) => Math.floor(stake * 1.9), // комиссия 10%
   push: (stake: number) => stake, // возврат ставки
 };
+
+// helper для PvP: "AS" -> {rank:"A", suit:"♠"}
+function fromCodeToCard(code: string): Card {
+  const rank = code.replace(/[SHDC]$/, "") as Card["rank"];
+  const s = code.slice(-1);
+  const suit = (s === "S" ? "♠" : s === "H" ? "♥" : s === "D" ? "♦" : "♣") as Card["suit"];
+  return { rank, suit };
+}
 
 /* =================== Малые UI-атомы =================== */
 
@@ -238,15 +250,15 @@ export default function App() {
 
   const [bet, setBet] = useState(25);
 
-  // game state
+  // game state (универсальные; SOLO/PvP)
   const [deck, setDeck] = useState(createDeck());
   const [player, setPlayer] = useState<Card[]>([]);
   const [dealer, setDealer] = useState<Card[]>([]);
-  const [turn, setTurn] = useState<Turn>("player");
+  const [turn, setTurn] = useState<Turn>("player"); // SOLO использует; PvP — игнор
   const [revealed, setRevealed] = useState(false);
   const [roundResult, setRoundResult] = useState<Result>(null);
 
-  // текущий roundId и stake на сервере
+  // SOLO: текущий roundId и stake на сервере
   const [roundId, setRoundId] = useState<string | null>(null);
   const [stakeOnServer, setStakeOnServer] = useState<number>(0);
 
@@ -257,7 +269,23 @@ export default function App() {
   // partners
   const [refLink, setRefLink] = useState<string>("");
 
-  // bet countdown
+  // ====== PvP realtime ======
+  const socketRef = useRef<Socket | null>(null);
+  const [queued, setQueued] = useState(false); // для экрана ставки
+  const [pvpRoom, setPvpRoom] = useState<{ roomId: string; roundId?: string; stake?: number } | null>(null);
+  const [pvpStood, setPvpStood] = useState<Record<string, boolean>>({});
+  const [deadline, setDeadline] = useState<Record<string, number>>({});
+  const [now, setNow] = useState(() => Date.now());
+
+  const isPvP = !!pvpRoom;
+
+  // таймер тикает локально для обратного отсчёта
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(t);
+  }, []);
+
+  // bet countdown (из старого UX) — теперь не используем авто-лкбби, только для анимации круга, если хочется
   const BET_SECONDS = 10;
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
@@ -277,7 +305,16 @@ export default function App() {
     setUserId(id);
     (async () => {
       try {
-        await initUser(id); // стартовый баланс для гостя/нового юзера
+        // отправляем профиль в /init (для имён в лидерборде)
+        const tg = getTelegramUser();
+        await initUser({
+          userId: id,
+          username: tg?.username ?? null,
+          first_name: tg?.first_name ?? null,
+          last_name: tg?.last_name ?? null,
+          displayName: tg?.displayName ?? null,
+        });
+
         const b = await apiGetBalance(id);
         setBalance(b.balance);
       } catch (e) {
@@ -319,6 +356,82 @@ export default function App() {
     }
   }
 
+  /* ======== Realtime: socket lifecycle ======== */
+  useEffect(() => {
+    if (!userId) return;
+
+    const base =
+      (import.meta as any)?.env?.VITE_WS_URL?.trim?.() ||
+      (location.hostname === "localhost"
+        ? "http://localhost:3001"
+        : new URL((import.meta as any)?.env?.VITE_API_URL ?? "https://blackjack-royale-backend.onrender.com").origin);
+
+    const s: Socket = io(base, { transports: ["websocket", "polling"] });
+    socketRef.current = s;
+
+    s.emit("hello", { userId });
+
+    s.on("queued", ({ stake }) => {
+      setQueued(true);
+    });
+    s.on("queue_canceled", () => {
+      setQueued(false);
+    });
+
+    // матч найден -> сервер сразу раздаёт и пошлёт pvp_state; экран игры включим здесь
+    s.on("match_found", ({ roomId, players, stake }) => {
+      setQueued(false);
+      setPvpRoom({ roomId, stake });
+      alert(`Матч найден!\nКомната: ${roomId}\nИгроки: ${players.join(" vs ")}`);
+      setScreen("game");
+    });
+
+    // сервер присылает полное состояние раунда
+    s.on("pvp_state", ({ roomId, roundId, hands, sums, stood, deadline: dl, stake }) => {
+      setPvpRoom({ roomId, roundId, stake });
+      setPvpStood(stood || {});
+      setDeadline(dl || {});
+      setRevealed(true);
+      setRoundResult(null);
+
+      // маппим руки на наш UI (ты/оппонент)
+      const myId = userId;
+      const oppId = Object.keys(hands).find((u) => u !== myId) || myId;
+
+      setPlayer((hands[myId] || []).map(fromCodeToCard));
+      setDealer((hands[oppId] || []).map(fromCodeToCard));
+      // turn больше не нужен — ходы параллельно; для совместимости пусть будет "player"
+      setTurn("player");
+    });
+
+    s.on("pvp_end", ({ result, sums }) => {
+      // показываем результат для текущего игрока
+      const r = (result?.[userId] || "push") as Exclude<Result, null>;
+      setRoundResult(r);
+
+      // локальная UI-история
+      const item: UIHistoryItem = {
+        id: newRoundId(),
+        when: new Date().toLocaleString(),
+        bet: pvpRoom?.stake ?? bet,
+        result: r,
+        you: sums?.[userId],
+        opp: Object.entries(sums || {}).find(([k]) => k !== userId)?.[1] as number | undefined,
+      };
+      setHistory((h) => [item, ...h].slice(0, 50));
+
+      refreshBalance();
+      loadLeaderboard().catch(() => {});
+    });
+
+    s.on("error_msg", (m: any) => alert(m?.message || "Ошибка матчмейкинга"));
+
+    return () => {
+      s.close();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+
   /* ======== Helpers ======== */
   function resetGameState() {
     setPlayer([]);
@@ -334,8 +447,12 @@ export default function App() {
     resetGameState();
     setScreen("menu");
     setSecondsLeft(null);
+    setQueued(false);
+    setPvpRoom(null);
+    setPvpStood({});
+    setDeadline({});
   }
-  function startRoundFromDeck(useExistingDeck: boolean) {
+  function startRoundFromDeck(useExistingDeck: boolean) { // SOLO
     const d = useExistingDeck ? [...deck] : createDeck();
     const p = [d.pop()!, d.pop()!];
     const o = [d.pop()!, d.pop()!];
@@ -347,52 +464,11 @@ export default function App() {
     setRoundResult(null);
   }
 
-  /* ======== Bet flow ======== */
-  function openBetStage() {
-    setSecondsLeft(BET_SECONDS);
-    setScreen("bet");
-  }
-  // countdown
-  useEffect(() => {
-    if (screen !== "bet" || secondsLeft == null) return;
-    if (secondsLeft <= 0) {
-      makeLobby();
-      goMenu();
-      return;
-    }
-    const t = setTimeout(() => setSecondsLeft((s) => (s == null ? null : s - 1)), 1000);
-    return () => clearTimeout(t);
-  }, [screen, secondsLeft]);
-
-  async function confirmBetAndStart() {
-    if (bet > balance) {
-      alert("Недостаточно средств для ставки");
-      return;
-    }
-    const rId = newRoundId();
-    try {
-      // списание на сервере
-      const res = await apiBet(userId, bet, rId);
-      if (!res.success) {
-        alert(res.message || "Не удалось сделать ставку");
-        return;
-      }
-      setBalance(res.balance);
-      setRoundId(rId);
-      setStakeOnServer(bet);
-
-      // локально запускаем сам раунд
-      startRoundFromDeck(false);
-      setScreen("game");
-      setSecondsLeft(null);
-    } catch (e: any) {
-      alert(e?.message || "Ошибка /bet");
-    }
-  }
-
-  /* ======== Menu actions ======== */
+  /* ======== Flow: сначала ставка, потом подбор ======== */
   function onPlay() {
-    openBetStage();
+    // Теперь "Играть" открывает экран ставки (как просил)
+    setSecondsLeft(null);
+    setScreen("bet");
   }
   function makeLobby() {
     const lobbyCode = Math.random().toString(36).slice(2, 8);
@@ -408,11 +484,47 @@ export default function App() {
     makeLobby();
   }
 
-  /* ======== Game controls ======== */
-  function backFromGame() {
-    goMenu();
+  async function confirmBetAndStart() {
+    if (bet > balance) {
+      alert("Недостаточно средств для ставки");
+      return;
+    }
+
+    // PvP: запуск подбора по ставке
+    if (socketRef.current) {
+      setQueued(true);
+      socketRef.current.emit("join_queue", { stake: bet });
+      return; // ждём match_found/pvp_state от сервера
+    }
+
+    // SOLO (fallback на случай отсутствия сокета) — твой старый флоу
+    const rId = newRoundId();
+    try {
+      const res = await apiBet(userId, bet, rId);
+      if (!res.success) {
+        alert(res.message || "Не удалось сделать ставку");
+        return;
+      }
+      setBalance(res.balance);
+      setRoundId(rId);
+      setStakeOnServer(bet);
+
+      startRoundFromDeck(false);
+      setScreen("game");
+      setSecondsLeft(null);
+    } catch (e: any) {
+      alert(e?.message || "Ошибка /bet");
+    }
   }
+
+  /* ======== Game controls ======== */
   function hit() {
+    // PvP — действие идёт на сервер; он уже запрещает брать после перебора/стоя
+    if (isPvP && pvpRoom) {
+      socketRef.current?.emit("pvp_action", { roomId: pvpRoom.roomId, action: "hit" });
+      return;
+    }
+    // SOLO:
     if (turn !== "player") return;
     const d = [...deck];
     const c = d.pop();
@@ -421,18 +533,22 @@ export default function App() {
     setDeck(d);
     setPlayer(next);
 
-    // автостоп при переборе: ход переходит дилеру
     if (handValue(next) > 21) {
       setTurn("dealer");
     }
   }
   function stand() {
+    if (isPvP && pvpRoom) {
+      socketRef.current?.emit("pvp_action", { roomId: pvpRoom.roomId, action: "stand" });
+      return;
+    }
     if (turn !== "player") return;
     setTurn("dealer");
   }
 
-  // dealer auto play
+  // dealer auto play (только SOLO; в PvP управляет сервер)
   useEffect(() => {
+    if (isPvP) return;
     if (turn !== "dealer") return;
     const t = setTimeout(() => {
       setRevealed(true);
@@ -449,10 +565,11 @@ export default function App() {
     }, 500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turn]);
+  }, [turn, isPvP]);
 
-  // end of round -> начисления на сервере + локальная история
+  // end of round SOLO -> начисления на сервере + локальная история
   useEffect(() => {
+    if (isPvP) return; // PvP делает сервер
     if (turn !== "end" || !roundId) return;
 
     (async () => {
@@ -499,10 +616,15 @@ export default function App() {
       loadLeaderboard().catch(() => {});
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turn]);
+  }, [turn, isPvP]);
 
   function nextRound() {
-    openBetStage();
+    // для SOLO оставим старый флоу
+    setScreen("bet");
+    setQueued(false);
+    setPvpRoom(null);
+    setPvpStood({});
+    setDeadline({});
   }
 
   /* =================== Screens =================== */
@@ -537,7 +659,7 @@ export default function App() {
       <div className="mt-6 p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
         <h3 className="text-white/90 font-semibold">Правила (кратко)</h3>
         <p className="text-white/60 text-sm mt-2 leading-relaxed">
-          Цель — сумма ближе к 21, не перебрав. Туз = 1 или 11. Оппонент берёт карты до 17+.
+          Цель — сумма ближе к 21, не перебрав. Туз = 1 или 11. В PvP ходят оба параллельно, на действие 30 секунд.
         </p>
       </div>
 
@@ -560,6 +682,7 @@ export default function App() {
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
         <div className="flex items-center justify-between">
           <h3 className="text-white/90 font-semibold">Выбери ставку</h3>
+          {/* Оставили твой индикатор (не критично) */}
           <div className="relative w-10 h-10">
             <svg width="40" height="40" viewBox="0 0 40 40">
               <circle cx="20" cy="20" r="17" stroke="rgba(255,255,255,.2)" strokeWidth="4" fill="none" />
@@ -589,18 +712,40 @@ export default function App() {
             </Button>
           ))}
         </div>
-        <Button size="lg" className="w-full mt-4" onClick={confirmBetAndStart} disabled={bet > balance}>
-          Подтвердить ставку
+        <Button
+          size="lg"
+          className="w-full mt-4"
+          onClick={confirmBetAndStart}
+          disabled={bet > balance}
+        >
+          Подтвердить и найти соперника
         </Button>
         {bet > balance && <div className="text-rose-300 text-sm mt-2">Недостаточно средств</div>}
+
+        {queued && (
+          <div className="mt-4 flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white/80">
+            <span>Поиск соперника на ставку {bet}…</span>
+            <Button
+              size="sm"
+              onClick={() => socketRef.current?.emit("cancel_queue", { stake: bet })}
+            >
+              Отменить
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );
 
+  // секунды до дедлайна от сервера
+  const myLeftMs = Math.max(0, (deadline[userId] || 0) - now);
+  const oppId = Object.keys(pvpStood).find((u) => u !== userId);
+  const oppLeftMs = Math.max(0, (oppId ? deadline[oppId] : 0) || 0 - now);
+
   const GameScreen = (
     <div className="p-4">
       <div className="flex items-center justify-between mb-3">
-        <Button onClick={backFromGame} className="h-9 px-3">
+        <Button onClick={goMenu} className="h-9 px-3">
           Назад
         </Button>
         <Pill>Баланс: {balance}</Pill>
@@ -609,12 +754,14 @@ export default function App() {
       {/* Opponent */}
       <div className="mt-2">
         <div className="flex items-center justify-between">
-          <span className="text-white/70 text-sm">Оппонент</span>
-          <span className="text-white/70 text-sm">{revealed || turn !== "dealer" ? dVal : "?"}</span>
+          <span className="text-white/70 text-sm">
+            Оппонент {isPvP && pvpRoom?.stake ? `• ставка ${pvpRoom.stake}` : ""}
+          </span>
+          {isPvP && <span className="text-white/70 text-sm">{Math.ceil(oppLeftMs / 1000)}с</span>}
         </div>
         <div className="flex gap-2 mt-2">
           {dealer.map((c, i) => (
-            <CardView key={i} c={c} hidden={i === 0 && !revealed && turn !== "end" && turn !== "dealer"} />
+            <CardView key={i} c={c} />
           ))}
         </div>
       </div>
@@ -623,7 +770,7 @@ export default function App() {
       <div className="mt-8">
         <div className="flex items-center justify-between">
           <span className="text-white/90 font-medium">Ты</span>
-          <span className="text-white/90 font-medium">{pVal}</span>
+          {isPvP && <span className="text-white/90 font-medium">{Math.ceil(myLeftMs / 1000)}с</span>}
         </div>
         <div className="flex gap-2 mt-2">
           {player.map((c, i) => (
@@ -634,24 +781,30 @@ export default function App() {
 
       {/* Controls */}
       <div className="mt-8 grid grid-cols-2 gap-3">
-        {turn === "player" ? (
-          <>
-            <Button size="lg" onClick={hit} className="w-full">
-              Взять
-            </Button>
-            <Button size="lg" onClick={stand} className="w-full">
-              Стоп
-            </Button>
-          </>
-        ) : turn === "end" ? (
-          <Button size="lg" onClick={nextRound} className="col-span-2 w-full">
-            Следующий раунд
-          </Button>
-        ) : (
-          <Button disabled size="lg" className="col-span-2 w-full">
-            Ход оппонента…
-          </Button>
-        )}
+        <Button
+          size="lg"
+          onClick={hit}
+          className="w-full"
+          disabled={
+            isPvP
+              ? pvpStood[userId] || pVal > 21 // сервер всё равно проверит, но в UI блокируем
+              : turn !== "player"
+          }
+        >
+          Взять
+        </Button>
+        <Button
+          size="lg"
+          onClick={stand}
+          className="w-full"
+          disabled={
+            isPvP
+              ? pvpStood[userId] // уже нажал Стоп/перебрал
+              : turn !== "player"
+          }
+        >
+          Стоп
+        </Button>
       </div>
 
       {/* Result info */}
@@ -669,10 +822,19 @@ export default function App() {
         >
           <div className="flex items-center gap-2">
             <Info size={18} />
-            {roundResult === "win" && <span>Победа! +{PAYOUT.win(stakeOnServer)}</span>}
+            {roundResult === "win" && <span>Победа!</span>}
             {roundResult === "lose" && <span>Поражение…</span>}
-            {roundResult === "push" && <span>Ничья. +{PAYOUT.push(stakeOnServer)}</span>}
+            {roundResult === "push" && <span>Ничья</span>}
           </div>
+        </div>
+      )}
+
+      {/* SOLO — кнопка следующего раунда */}
+      {!isPvP && turn === "end" && (
+        <div className="mt-6">
+          <Button size="lg" onClick={nextRound} className="w-full">
+            Следующий раунд
+          </Button>
         </div>
       )}
     </div>
@@ -721,9 +883,9 @@ export default function App() {
             >
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-xl border border-white/10 bg-gradient-to-br from-[#1e293b] to-[#0b1220] grid place-items-center text-white/80">
-                  {(u.userId.match(/[a-z0-9]/i)?.[0] || "U").toUpperCase()}
+                  {(u.name || u.userId).charAt(0).toUpperCase()}
                 </div>
-                <div className="text-white truncate max-w-[160px]">{u.userId}</div>
+                <div className="text-white truncate max-w-[160px]">{u.name ?? u.userId}</div>
               </div>
               <div className="text-white/80">
                 {lbMetric === "wins" ? `${u.wins} побед` : `${u.profit > 0 ? "+" : ""}${u.profit}`}
@@ -769,7 +931,7 @@ export default function App() {
         </div>
       </div>
 
-      <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
+      <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blур-md">
         <div className="text-white/90 font-medium mb-2">История (локальная)</div>
         <div className="mt-3 space-y-2 max-h-60 overflow-auto pr-1">
           {history.length === 0 && (
