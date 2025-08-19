@@ -12,16 +12,25 @@ import {
   getRefLink,
   topup,
   applyRef,
-  getTelegramUser,
 } from "./lib/api";
 
 import { socket } from "./lib/socket";
 
-/* =================== Cards =================== */
+/* =================== Cards / Blackjack =================== */
 const SUITS = ["♠", "♥", "♦", "♣"] as const;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"] as const;
+
 type Card = { rank: typeof RANKS[number]; suit: typeof SUITS[number] };
 
+function createDeck() {
+  const deck: Card[] = [];
+  for (const s of SUITS) for (const r of RANKS) deck.push({ rank: r, suit: s });
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  return deck;
+}
 function cardValue(rank: string) {
   if (rank === "A") return 11;
   if (["K", "Q", "J"].includes(rank)) return 10;
@@ -43,6 +52,7 @@ function handValue(cards: { rank: string; suit: string }[]) {
 
 /* =================== Types / UI utils =================== */
 type Screen = "menu" | "bet" | "game" | "leaderboard" | "profile" | "partners";
+type Turn = "player" | "dealer" | "end";
 type Result = "win" | "lose" | "push" | null;
 
 type UIHistoryItem = {
@@ -58,7 +68,9 @@ const cn = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ")
 const bg = "bg-[#0a0f14]";
 const BLUE = "#2176ff";
 
-/* =================== helpers =================== */
+/* =================== helpers (id, round, payout) =================== */
+
+// берём id из Telegram, иначе постоянный guest_<uuid> в localStorage
 function uid(): string {
   const tgId = (window as any)?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
   if (tgId) return `tg_${tgId}`;
@@ -71,14 +83,18 @@ function uid(): string {
   }
   return g;
 }
-const newId = () => (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
 
+const newRoundId = () =>
+  (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+
+// твои правила выплат
 const PAYOUT = {
-  win: (stake: number) => Math.floor(stake * 1.9),
-  push: (stake: number) => stake,
+  win: (stake: number) => Math.floor(stake * 1.9), // комиссия 10%
+  push: (stake: number) => stake, // возврат ставки
 };
 
 /* =================== Малые UI-атомы =================== */
+
 const Button: React.FC<
   React.ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean; size?: "lg" | "md" | "sm" }
 > = ({ className, active, size = "md", ...props }) => (
@@ -104,18 +120,23 @@ const Pill = ({ children }: { children: React.ReactNode }) => (
   </span>
 );
 
-const CardView = ({ c }: { c: Card }) => (
+const CardView = ({ c, hidden = false }: { c: Card; hidden?: boolean }) => (
   <div
     className={cn(
       "w-16 h-24 sm:w-20 sm:h-28 rounded-2xl border flex items-center justify-center font-semibold select-none",
       "border-white/10 bg-[#111827]/90 text-white backdrop-blur-md",
-      "shadow-[0_14px_28px_-16px_rgba(0,0,0,.8)]"
+      "shadow-[0_14px_28px_-16px_rgba(0,0,0,.8)]",
+      hidden && "bg-[#0e141b]/90 border-white/5"
     )}
   >
-    <span className="text-xl sm:text-2xl" style={{ color: c.suit === "♥" || c.suit === "♦" ? BLUE : "#cfe2ff" }}>
-      {c.rank}
-      <span className="ml-1 opacity-80">{c.suit}</span>
-    </span>
+    {!hidden ? (
+      <span className="text-xl sm:text-2xl" style={{ color: c.suit === "♥" || c.suit === "♦" ? BLUE : "#cfe2ff" }}>
+        {c.rank}
+        <span className="ml-1 opacity-80">{c.suit}</span>
+      </span>
+    ) : (
+      <span className="opacity-30">●●</span>
+    )}
   </div>
 );
 
@@ -154,7 +175,7 @@ const ShuffleDeck = () => (
   </>
 );
 
-/* ============ Live Ticker ============ */
+/* ============ Live Ticker (полоса пополнений) ============ */
 const LiveTicker: React.FC = () => {
   const [items, setItems] = useState<{ id: string; amount: number }[]>(
     () => Array.from({ length: 16 }, (_, i) => ({ id: `init_${i}`, amount: [40, 80, 120, 200, 60, 90, 150, 240][i % 8] }))
@@ -203,10 +224,10 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("menu");
   const [userId, setUserId] = useState<string>("");
 
-  // баланс с бэка
+  // баланс только с бэка
   const [balance, setBalance] = useState<number>(0);
 
-  // локальная история для UI
+  // локальная история только для UI
   const [history, setHistory] = useState<UIHistoryItem[]>(() => {
     try {
       const raw = localStorage.getItem("history_v1");
@@ -219,22 +240,27 @@ export default function App() {
 
   const [bet, setBet] = useState(25);
 
-  // PVP state с сервера
-  const [currentRoom, setCurrentRoom] = useState<string | null>(null);
-  const [isQueueing, setIsQueueing] = useState(false);
-  const [deadline, setDeadline] = useState<number | null>(null);
+  // game state (локальная колода — используется в solo; в PvP управляется сервером)
+  const [deck, setDeck] = useState(createDeck());
+  const [player, setPlayer] = useState<Card[]>([]);
+  const [dealer, setDealer] = useState<Card[]>([]);
+  const [turn, setTurn] = useState<Turn>("player");
+  const [revealed, setRevealed] = useState(false);
+  const [roundResult, setRoundResult] = useState<Result>(null);
 
-  // руки игроков (мы/оппонент) — приходят по сокету
-  const [meHand, setMeHand] = useState<Card[]>([]);
-  const [oppHand, setOppHand] = useState<Card[]>([]);
-  const pVal = useMemo(() => handValue(meHand), [meHand]);
-  const oVal = useMemo(() => handValue(oppHand), [oppHand]);
-
-  // round accounting
+  // текущий roundId и stake на сервере (solo использует roundId для /win)
   const [roundId, setRoundId] = useState<string | null>(null);
   const [stakeOnServer, setStakeOnServer] = useState<number>(0);
-  const [roundResult, setRoundResult] = useState<Result>(null);
-  const [payoutDone, setPayoutDone] = useState(false);
+
+  // PvP
+  const [currentRoom, setCurrentRoom] = useState<string | null>(null);
+  const [isQueueing, setIsQueueing] = useState(false);
+  const [pvpMode, setPvpMode] = useState(false);
+  const [youStood, setYouStood] = useState(false);
+  const [oppStood, setOppStood] = useState(false);
+  const [oppScore, setOppScore] = useState<number | null>(null);
+  const [deadlineMs, setDeadlineMs] = useState<number | null>(null);
+  const [pvpSecondsLeft, setPvpSecondsLeft] = useState<number | null>(null);
 
   // leaderboard
   const [leaders, setLeaders] = useState<LeaderboardRow[] | null>(null);
@@ -243,49 +269,45 @@ export default function App() {
   // partners
   const [refLink, setRefLink] = useState<string>("");
 
-  // bet countdown (экран выбора ставки)
+  // bet countdown (экран ставки)
   const BET_SECONDS = 10;
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
-  /* ======== Persistence ======== */
+  const pVal = useMemo(() => handValue(player), [player]);
+  const dVal = useMemo(() => handValue(dealer), [dealer]);
+
+  /* ======== Persistence (save history only) ======== */
   useEffect(() => {
     try {
       localStorage.setItem("history_v1", JSON.stringify(history));
     } catch {}
   }, [history]);
 
-  /* ======== Init ======== */
+  /* ======== Init from backend ======== */
   useEffect(() => {
     const id = uid();
     setUserId(id);
-
     (async () => {
       try {
-        const tg = getTelegramUser();
-        await initUser({
-          userId: id,
-          username: tg?.username ?? null,
-          first_name: tg?.first_name ?? null,
-          last_name: tg?.last_name ?? null,
-          displayName: tg?.displayName ?? null,
-        });
-
+        await initUser(id); // стартовый баланс для гостя/нового юзера
         const b = await apiGetBalance(id);
         setBalance(b.balance);
-
-        // hello сокету
-        socket.emit("hello", { userId: id, name: tg?.displayName || tg?.username || null });
+        // >>> привет сокету
+        socket.emit("hello", { userId: id });
       } catch (e) {
         console.error(e);
       }
     })();
 
-    // реф-код из URL
+    // если пришли по реф-ссылке ?ref=CODE — привязываем (без жёстких ошибок)
     const url = new URL(window.location.href);
     const ref = url.searchParams.get("ref");
     if (ref) applyRef(id, ref).catch(() => {});
 
+    // лидерборд
     loadLeaderboard("wins").catch(() => {});
+
+    // партнёрская ссылка
     getRefLink(id)
       .then((r) => setRefLink(r.web || r.telegram))
       .catch(() => {});
@@ -311,104 +333,129 @@ export default function App() {
     }
   }
 
-  /* ======== MM & Game socket handlers ======== */
+  /* ======== PvP подписки ======== */
   useEffect(() => {
-    function applyState(payload: any) {
-      const st = payload?.state;
-      if (!st || !Array.isArray(st.players)) return;
-      const me = st.players.find((p: any) => p.userId === userId);
-      const opp = st.players.find((p: any) => p.userId !== userId);
-      const toCard = (c: any): Card => ({ rank: c.rank, suit: c.suit });
-      setMeHand(Array.isArray(me?.hand) ? me.hand.map(toCard) : []);
-      setOppHand(Array.isArray(opp?.hand) ? opp.hand.map(toCard) : []);
-      setDeadline(st.deadline || null);
-    }
-
     function onMatchFound({ roomId }: any) {
       setIsQueueing(false);
       setCurrentRoom(roomId);
+      setPvpMode(true);
       socket.emit("ready", { roomId });
-    }
-    function onStart({ roomId, state }: any) {
-      setCurrentRoom(roomId);
       setScreen("game");
-      setRoundResult(null);
-      setPayoutDone(false);
-      applyState({ state });
     }
-    function onState(msg: any) {
-      applyState(msg);
+    function onState({ roomId, you, opp, deadline, stake }: any) {
+      if (currentRoom && roomId !== currentRoom) return;
+      setStakeOnServer(stake ?? stakeOnServer);
+      setPlayer(you.hand);
+      setDealer(opp.hand);
+      setOppScore(opp.score);
+      setYouStood(!!you.stood);
+      setOppStood(!!opp.stood);
+      setRevealed(true);
+      setTurn(you.stood ? (opp.stood ? "end" : "dealer") : "player");
+      setDeadlineMs(deadline || null);
     }
-    async function onGameOver({ stake, results, state }: any) {
-      applyState({ state });
-      setRoundResult(null);
-      setTimeout(() => setRoundResult("push"), 0); // чтобы плавно показать снизу (перезапишем ниже точно)
+    function onResult({ roomId, you, opp, result }: any) {
+      if (currentRoom && roomId !== currentRoom) return;
 
-      // найдём наш результат
-      const meRes = (results || []).find((r: any) => r.userId === userId);
-      const outcome: Result = meRes?.result || "push";
+      // показать результат
+      setRoundResult(result);
+      setTurn("end");
+      setYouStood(true);
+      setOppStood(true);
+      setPvpSecondsLeft(0);
 
-      // Выплата по исходу (идемпотентность по our roundId)
-      try {
-        if (roundId && !payoutDone) {
-          if (outcome === "win") {
-            const r = await apiWin(userId, PAYOUT.win(stakeOnServer), roundId);
-            if (r.success) setBalance(r.balance);
-          } else if (outcome === "push") {
-            const r = await apiWin(userId, PAYOUT.push(stakeOnServer), roundId);
-            if (r.success) setBalance(r.balance);
-          }
-          setPayoutDone(true);
-        }
-      } catch (e) {
-        console.error("settle error:", e);
-      }
-
-      // UI-история
+      // локальная история
       const item: UIHistoryItem = {
-        id: newId(),
+        id: newRoundId(),
         when: new Date().toLocaleString(),
         bet: stakeOnServer,
-        result: outcome as Exclude<Result, null>,
-        you: handValue(meHand),
-        opp: handValue(oppHand),
+        result,
+        you,
+        opp,
       };
       setHistory((h) => [item, ...h].slice(0, 50));
 
-      // синхронизируем всё и вернёмся к ставке
-      setRoundResult(outcome);
-      setRoundId(null);
-      setStakeOnServer(0);
+      // подтянуть обновлённый баланс с бэка
       refreshBalance();
       loadLeaderboard().catch(() => {});
     }
 
     socket.on("match-found", onMatchFound);
-    socket.on("start", onStart);
     socket.on("state", onState);
-    socket.on("game-over", onGameOver);
+    socket.on("result", onResult);
 
     return () => {
       socket.off("match-found", onMatchFound);
-      socket.off("start", onStart);
       socket.off("state", onState);
-      socket.off("game-over", onGameOver);
+      socket.off("result", onResult);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, roundId, payoutDone, stakeOnServer, meHand, oppHand]);
+  }, [currentRoom, stakeOnServer]);
+
+  // PvP таймер по дедлайну комнаты
+  useEffect(() => {
+    if (!pvpMode || !deadlineMs) {
+      setPvpSecondsLeft(null);
+      return;
+    }
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((deadlineMs - Date.now()) / 1000));
+      setPvpSecondsLeft(left);
+    };
+    tick();
+    const t = setInterval(tick, 300);
+    return () => clearInterval(t);
+  }, [pvpMode, deadlineMs]);
+
+  /* ======== Helpers ======== */
+  function resetGameState() {
+    setPlayer([]);
+    setDealer([]);
+    setDeck(createDeck());
+    setTurn("player");
+    setRevealed(false);
+    setRoundResult(null);
+    setStakeOnServer(0);
+    setRoundId(null);
+
+    // PvP сброс
+    setCurrentRoom(null);
+    setPvpMode(false);
+    setIsQueueing(false);
+    setOppScore(null);
+    setYouStood(false);
+    setOppStood(false);
+    setDeadlineMs(null);
+    setPvpSecondsLeft(null);
+  }
+  function goMenu() {
+    resetGameState();
+    setScreen("menu");
+    setSecondsLeft(null);
+  }
+  function startRoundFromDeck(useExistingDeck: boolean) {
+    const d = useExistingDeck ? [...deck] : createDeck();
+    const p = [d.pop()!, d.pop()!];
+    const o = [d.pop()!, d.pop()!];
+    setDeck(d);
+    setPlayer(p);
+    setDealer(o);
+    setTurn("player");
+    setRevealed(false);
+    setRoundResult(null);
+  }
 
   /* ======== Bet flow ======== */
   function openBetStage() {
     setSecondsLeft(BET_SECONDS);
     setScreen("bet");
   }
-
+  // countdown для экрана ставок
   useEffect(() => {
     if (screen !== "bet" || secondsLeft == null) return;
     if (secondsLeft <= 0) {
-      // если не подтвердили вовремя — просто откатим
-      setScreen("menu");
-      setSecondsLeft(null);
+      // если не успел выбрать — просто выходим в меню (считай автокэнсел)
+      goMenu();
       return;
     }
     const t = setTimeout(() => setSecondsLeft((s) => (s == null ? null : s - 1)), 1000);
@@ -420,8 +467,9 @@ export default function App() {
       alert("Недостаточно средств для ставки");
       return;
     }
-    const rId = newId();
+    const rId = newRoundId();
     try {
+      // списание на сервере
       const res = await apiBet(userId, bet, rId);
       if (!res.success) {
         alert(res.message || "Не удалось сделать ставку");
@@ -431,16 +479,11 @@ export default function App() {
       setRoundId(rId);
       setStakeOnServer(bet);
 
-      // Встать в очередь и ждать матч
+      // ВСТАЁМ в очередь по этой ставке и ждём match-found/state
       setIsQueueing(true);
-      const tg = getTelegramUser();
-      socket.emit("queue", {
-        stake: bet,
-        roundId: rId,
-        name: tg?.displayName || tg?.username || null,
-      });
-
-      setScreen("menu");
+      setPvpMode(true); // готовимся к PvP
+      socket.emit("queue", { stake: bet });
+      setScreen("menu"); // экран ожидания
       setSecondsLeft(null);
     } catch (e: any) {
       alert(e?.message || "Ошибка /bet");
@@ -449,10 +492,9 @@ export default function App() {
 
   /* ======== Menu actions ======== */
   function onPlay() {
-    setRoundResult(null);
     openBetStage();
   }
-  function onPlayWithFriend() {
+  function makeLobby() {
     const lobbyCode = Math.random().toString(36).slice(2, 8);
     const url = `${window.location.origin}/?lobby=${lobbyCode}`;
     if (navigator.clipboard?.writeText) {
@@ -462,24 +504,121 @@ export default function App() {
       prompt("Скопируй ссылку:", url);
     }
   }
+  function onPlayWithFriend() {
+    makeLobby();
+  }
 
-  /* ======== Game controls (через сервер) ======== */
-  const myCanAct = roundResult == null && currentRoom != null;
+  /* ======== Game controls ======== */
+  function backFromGame() {
+    goMenu();
+  }
   function hit() {
-    if (!myCanAct) return;
-    socket.emit("move", { roomId: currentRoom, action: "hit" });
+    // PvP: ходы на сервер
+    if (pvpMode && currentRoom) {
+      if (!youStood) socket.emit("move", { roomId: currentRoom, action: "hit" });
+      return;
+    }
+
+    // SOLO (vs бот)
+    if (turn !== "player") return;
+    const d = [...deck];
+    const c = d.pop();
+    if (!c) return;
+    const next = [...player, c];
+    setDeck(d);
+    setPlayer(next);
+
+    if (handValue(next) > 21) {
+      setTurn("dealer");
+    }
   }
   function stand() {
-    if (!myCanAct) return;
-    socket.emit("move", { roomId: currentRoom, action: "stand" });
+    // PvP: серверу
+    if (pvpMode && currentRoom) {
+      if (!youStood) socket.emit("move", { roomId: currentRoom, action: "stand" });
+      return;
+    }
+
+    // SOLO
+    if (turn !== "player") return;
+    setTurn("dealer");
   }
+
+  // dealer auto play (SOLO) — в PvP сервер всё делает сам
+  useEffect(() => {
+    if (pvpMode) return;
+    if (turn !== "dealer") return;
+    const t = setTimeout(() => {
+      setRevealed(true);
+      let d = [...dealer];
+      let dd = [...deck];
+      while (handValue(d) < 17) {
+        const c = dd.pop();
+        if (!c) break;
+        d.push(c);
+      }
+      setDealer(d);
+      setDeck(dd);
+      setTurn("end");
+    }, 500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turn, pvpMode]);
+
+  // end of round SOLO -> начисления на сервере + локальная история
+  useEffect(() => {
+    if (pvpMode) return; // в PvP результат приходит событием "result"
+    if (turn !== "end" || !roundId) return;
+
+    (async () => {
+      const p = pVal;
+      const o = dVal;
+
+      let res: Exclude<Result, null> = "push";
+      if (p > 21 && o > 21) res = "push";
+      else if (p > 21) res = "lose";
+      else if (o > 21) res = "win";
+      else if (p > o) res = "win";
+      else if (p < o) res = "lose";
+
+      try {
+        if (res === "win") {
+          const r = await apiWin(userId, PAYOUT.win(stakeOnServer), roundId);
+          if (r.success) setBalance(r.balance);
+        } else if (res === "push") {
+          const r = await apiWin(userId, PAYOUT.push(stakeOnServer), roundId);
+          if (r.success) setBalance(r.balance);
+        }
+      } catch (e) {
+        console.error("settle error:", e);
+      }
+
+      // локальная UI-история
+      const id = newRoundId();
+      const item: UIHistoryItem = {
+        id,
+        when: new Date().toLocaleString(),
+        bet: stakeOnServer,
+        result: res,
+        you: p,
+        opp: o,
+      };
+      setHistory((h) => [item, ...h].slice(0, 50));
+
+      setRoundResult(res);
+      setRoundId(null);
+      setStakeOnServer(0);
+
+      // обновим баланс и лидерборд
+      refreshBalance();
+      loadLeaderboard().catch(() => {});
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turn, pvpMode]);
+
   function nextRound() {
-    setScreen("menu");
-    setCurrentRoom(null);
-    setMeHand([]);
-    setOppHand([]);
-    setDeadline(null);
-    setRoundResult(null);
+    // единый вход — снова экран ставок
+    openBetStage();
   }
 
   /* =================== Screens =================== */
@@ -520,8 +659,7 @@ export default function App() {
       <div className="mt-6 p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
         <h3 className="text-white/90 font-semibold">Правила (кратко)</h3>
         <p className="text-white/60 text-sm mt-2 leading-relaxed">
-          Игра 1-на-1: берите карты до тех пор, пока не решите остановиться. Перебор (&gt;21) — автопроигрыш. В раунде есть общий
-          таймер 30 сек: если ничего не сделал — автопоражение; если действовал, но не нажал «Стоп» — автостоп.
+          Цель — сумма ближе к 21, не перебрав. Туз = 1 или 11. В PvP оба играют одновременно, у каждого 30 секунд на решение.
         </p>
       </div>
 
@@ -535,7 +673,7 @@ export default function App() {
   const BetScreen = (
     <div className="p-4 space-y-6">
       <div className="flex items-center justify-between">
-        <Button onClick={() => setScreen("menu")} className="h-9 px-3">
+        <Button onClick={goMenu} className="h-9 px-3">
           Назад
         </Button>
         <Pill>Баланс: {balance}</Pill>
@@ -584,7 +722,7 @@ export default function App() {
   const GameScreen = (
     <div className="p-4">
       <div className="flex items-center justify-between mb-3">
-        <Button onClick={() => setScreen("menu")} className="h-9 px-3">
+        <Button onClick={backFromGame} className="h-9 px-3">
           Назад
         </Button>
         <Pill>Баланс: {balance}</Pill>
@@ -594,11 +732,13 @@ export default function App() {
       <div className="mt-2">
         <div className="flex items-center justify-between">
           <span className="text-white/70 text-sm">Оппонент</span>
-          <span className="text-white/70 text-sm">{oVal}</span>
+          <span className="text-white/70 text-sm">
+            {pvpMode ? (oppScore ?? "?") : revealed || turn !== "dealer" ? dVal : "?"}
+          </span>
         </div>
         <div className="flex gap-2 mt-2">
-          {oppHand.map((c, i) => (
-            <CardView key={i} c={c} />
+          {(pvpMode ? dealer : dealer).map((c, i) => (
+            <CardView key={i} c={c} hidden={!pvpMode && i === 0 && !revealed && turn !== "end" && turn !== "dealer"} />
           ))}
         </div>
       </div>
@@ -610,26 +750,37 @@ export default function App() {
           <span className="text-white/90 font-medium">{pVal}</span>
         </div>
         <div className="flex gap-2 mt-2">
-          {meHand.map((c, i) => (
+          {player.map((c, i) => (
             <CardView key={i} c={c} />
           ))}
         </div>
       </div>
 
+      {/* PvP timer */}
+      {pvpMode && pvpSecondsLeft != null && (
+        <div className="mt-4 text-white/70 text-sm">
+          Ход: {youStood ? "оппонента" : "твой"} • осталось {pvpSecondsLeft}s
+        </div>
+      )}
+
       {/* Controls */}
       <div className="mt-8 grid grid-cols-2 gap-3">
-        {roundResult == null ? (
+        {turn === "player" || (pvpMode && !youStood && turn !== "end") ? (
           <>
-            <Button size="lg" onClick={hit} className="w-full">
+            <Button size="lg" onClick={hit} className="w-full" disabled={pvpMode && youStood}>
               Взять
             </Button>
-            <Button size="lg" onClick={stand} className="w-full">
+            <Button size="lg" onClick={stand} className="w-full" disabled={pvpMode && youStood}>
               Стоп
             </Button>
           </>
-        ) : (
+        ) : turn === "end" || (pvpMode && youStood && oppStood) ? (
           <Button size="lg" onClick={nextRound} className="col-span-2 w-full">
             Следующий раунд
+          </Button>
+        ) : (
+          <Button disabled size="lg" className="col-span-2 w-full">
+            Ход оппонента…
           </Button>
         )}
       </div>
@@ -653,13 +804,6 @@ export default function App() {
             {roundResult === "lose" && <span>Поражение…</span>}
             {roundResult === "push" && <span>Ничья. +{PAYOUT.push(stakeOnServer)}</span>}
           </div>
-        </div>
-      )}
-
-      {/* Дедлайн */}
-      {deadline && roundResult == null && (
-        <div className="mt-4 text-white/60 text-xs">
-          До автодействий: {Math.max(0, Math.ceil((deadline - Date.now()) / 1000))}с
         </div>
       )}
     </div>
@@ -696,7 +840,9 @@ export default function App() {
       </div>
 
       {!leaders && <div className="text-white/60">Загрузка…</div>}
-      {leaders && leaders.length === 0 && <div className="text-white/60">Пока пусто — сыграй несколько раундов.</div>}
+      {leaders && leaders.length === 0 && (
+        <div className="text-white/60">Пока пусто — сыграй несколько раундов.</div>
+      )}
       {leaders && leaders.length > 0 && (
         <div className="space-y-2">
           {leaders.map((u) => (
@@ -706,11 +852,9 @@ export default function App() {
             >
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-xl border border-white/10 bg-gradient-to-br from-[#1e293b] to-[#0b1220] grid place-items-center text-white/80">
-                  {(u.name?.[0] || u.userId.match(/[a-z0-9]/i)?.[0] || "U").toUpperCase()}
+                  {(u.userId.match(/[a-z0-9]/i)?.[0] || "U").toUpperCase()}
                 </div>
-                <div className="text-white truncate max-w-[160px]">
-                  {u.name || u.userId}
-                </div>
+                <div className="text-white truncate max-w-[160px]">{u.userId}</div>
               </div>
               <div className="text-white/80">
                 {lbMetric === "wins" ? `${u.wins} побед` : `${u.profit > 0 ? "+" : ""}${u.profit}`}
@@ -731,7 +875,7 @@ export default function App() {
         <Pill>Баланс: {balance}</Pill>
       </div>
 
-      {/* Тестовое пополнение */}
+      {/* Тестовое пополнение (+1000) с фоллбэком */}
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
         <div className="text-white/90 font-medium mb-2">Тестовое пополнение</div>
         <div className="flex gap-2 flex-wrap">
@@ -756,7 +900,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* История */}
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
         <div className="text-white/90 font-medium mb-2">История (локальная)</div>
         <div className="mt-3 space-y-2 max-h-60 overflow-auto pr-1">
@@ -876,7 +1019,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Bottom Nav */}
+        {/* Bottom Nav (4 вкладки) — скрыт на ставке и в игре */}
         {screen !== "game" && screen !== "bet" && (
           <nav
             className={cn(
