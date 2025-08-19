@@ -4,20 +4,28 @@ export type LeaderboardRow = {
   userId: string;
   wins: number;
   profit: number;
-  name?: string | null; // имя/ник
+  name?: string | null;
 };
 
 type Json = Record<string, any>;
 
-const BASE = (() => {
+/** БАЗОВЫЙ URL бэкенда (экспорт ОБЯЗАТЕЛЕН для socket.ts) */
+export const BASE: string = (() => {
   const env = (import.meta as any)?.env?.VITE_API_URL?.trim?.();
-  const fallback =
-    location.hostname === "localhost" ? "http://localhost:3001" : "https://blackjack-royale-backend.onrender.com";
+  const isLocal =
+    typeof window !== "undefined" &&
+    /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
+
+  const fallback = isLocal
+    ? "http://localhost:3001"
+    : "https://blackjack-royale-backend.onrender.com"; // замени на свой прод-URL при деплое
+
   const url = (env || fallback).replace(/\/+$/, "");
   console.log("[API] BASE =", url);
   return url;
 })();
 
+/* -------- fetch helpers -------- */
 async function j<T>(path: string, body?: Json): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
@@ -33,30 +41,48 @@ async function jGet<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-// ===== PUBLIC =====
-export const initUser = (payload:
-  | string
-  | { userId: string; username?: string|null; first_name?: string|null; last_name?: string|null; displayName?: string|null }
+/* -------- Public API -------- */
+export const initUser = (
+  payload:
+    | string
+    | {
+        userId: string;
+        username?: string | null;
+        first_name?: string | null;
+        last_name?: string | null;
+        displayName?: string | null;
+      }
 ) => {
   const data = typeof payload === "string" ? { userId: payload } : payload;
-  return j<{ ok: true }>("/init", data);
+  return j<{ ok: true; balance: number }>("/init", data);
 };
 
-export const getBalance = (userId: string) => j<{ balance: number }>("/balance", { userId });
+export const getBalance = (userId: string) =>
+  j<{ ok?: boolean; balance: number }>("/balance", { userId });
+
 export const bet = (userId: string, amount: number, roundId: string) =>
-  j<{ success: boolean; balance: number; message?: string }>("/bet", { userId, amount, roundId });
+  j<{ success: boolean; balance: number; message?: string }>("/bet", {
+    userId,
+    amount,
+    roundId,
+  });
+
 export const win = (userId: string, amount: number, roundId: string) =>
   j<{ success: boolean; balance: number }>("/win", { userId, amount, roundId });
+
 export const topup = (userId: string, amount: number) =>
-  j<{ success: boolean; balance: number }>("/topup", { userId, amount });
+  j<{ ok?: boolean; balance: number }>("/topup", { userId, amount });
 
 export const getLeaderboard = (metric: "wins" | "profit" = "wins", limit = 20) =>
   jGet<{ entries: LeaderboardRow[] }>(`/leaderboard?metric=${metric}&limit=${limit}`);
 
-export const getRefLink = (userId: string) => j<{ web: string; telegram: string }>("/reflink", { userId });
-export const applyRef = (userId: string, code: string) => j<{ success: boolean }>("/apply-ref", { userId, code });
+export const getRefLink = (userId: string) =>
+  j<{ web: string; telegram: string }>("/reflink", { userId });
 
-// helper: Telegram user
+export const applyRef = (userId: string, code: string) =>
+  j<{ success: boolean }>("/apply-ref", { userId, code });
+
+/* -------- Telegram user helper -------- */
 export function getTelegramUser() {
   const tg = (window as any)?.Telegram?.WebApp;
   const u = tg?.initDataUnsafe?.user;
