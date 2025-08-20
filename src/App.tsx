@@ -178,7 +178,11 @@ const ShuffleDeck = () => (
 /* ============ Live Ticker (полоса пополнений) ============ */
 const LiveTicker: React.FC = () => {
   const [items, setItems] = useState<{ id: string; amount: number }[]>(
-    () => Array.from({ length: 16 }, (_, i) => ({ id: `init_${i}`, amount: [40, 80, 120, 200, 60, 90, 150, 240][i % 8] }))
+    () =>
+      Array.from({ length: 16 }, (_, i) => ({
+        id: `init_${i}`,
+        amount: [40, 80, 120, 200, 60, 90, 150, 240][i % 8],
+      }))
   );
 
   useEffect(() => {
@@ -258,9 +262,9 @@ export default function App() {
   const [pvpMode, setPvpMode] = useState(false);
   const [youStood, setYouStood] = useState(false);
   const [oppStood, setOppStood] = useState(false);
-  const [oppScore, setOppScore] = useState<number | null>(null);
   const [deadlineMs, setDeadlineMs] = useState<number | null>(null);
   const [pvpSecondsLeft, setPvpSecondsLeft] = useState<number | null>(null);
+  const [pvpRevealAll, setPvpRevealAll] = useState(false); // <<< раскрывать ли все карты оппонента (в конце)
 
   // leaderboard
   const [leaders, setLeaders] = useState<LeaderboardRow[] | null>(null);
@@ -275,6 +279,12 @@ export default function App() {
 
   const pVal = useMemo(() => handValue(player), [player]);
   const dVal = useMemo(() => handValue(dealer), [dealer]);
+
+  // публичный счёт оппонента = сумма первых двух карт
+  const oppPublicScore = useMemo(() => {
+    if (!pvpMode) return null;
+    return handValue(dealer.slice(0, 2));
+  }, [pvpMode, dealer]);
 
   /* ======== Persistence (save history only) ======== */
   useEffect(() => {
@@ -339,6 +349,7 @@ export default function App() {
       setIsQueueing(false);
       setCurrentRoom(roomId);
       setPvpMode(true);
+      setPvpRevealAll(false);
       socket.emit("ready", { roomId });
       setScreen("game");
     }
@@ -347,35 +358,38 @@ export default function App() {
       setStakeOnServer(stake ?? stakeOnServer);
       setPlayer(you.hand);
       setDealer(opp.hand);
-      setOppScore(opp.score);
       setYouStood(!!you.stood);
       setOppStood(!!opp.stood);
-      setRevealed(true);
+      setRevealed(true); // solo-логика не влияет на pvp
       setTurn(you.stood ? (opp.stood ? "end" : "dealer") : "player");
       setDeadlineMs(deadline || null);
+      setPvpRevealAll(false); // до конца раунда скрываем добор оппонента
     }
     function onResult({ roomId, you, opp, result }: any) {
       if (currentRoom && roomId !== currentRoom) return;
 
-      // показать результат
+      // раскрыть все карты и показать итоговые суммы
+      setPvpRevealAll(true);
       setRoundResult(result);
       setTurn("end");
       setYouStood(true);
       setOppStood(true);
       setPvpSecondsLeft(0);
 
-      // локальная история
+      // история (подстрахуемся: если сервер не прислал числа — возьмём локально)
+      const youScore = typeof you === "number" ? you : pVal;
+      const oppScore = typeof opp === "number" ? opp : dVal;
+
       const item: UIHistoryItem = {
         id: newRoundId(),
         when: new Date().toLocaleString(),
         bet: stakeOnServer,
         result,
-        you,
-        opp,
+        you: youScore,
+        opp: oppScore,
       };
       setHistory((h) => [item, ...h].slice(0, 50));
 
-      // подтянуть обновлённый баланс с бэка
       refreshBalance();
       loadLeaderboard().catch(() => {});
     }
@@ -390,7 +404,7 @@ export default function App() {
       socket.off("result", onResult);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentRoom, stakeOnServer]);
+  }, [currentRoom, stakeOnServer, pVal, dVal]);
 
   // PvP таймер по дедлайну комнаты
   useEffect(() => {
@@ -422,11 +436,11 @@ export default function App() {
     setCurrentRoom(null);
     setPvpMode(false);
     setIsQueueing(false);
-    setOppScore(null);
     setYouStood(false);
     setOppStood(false);
     setDeadlineMs(null);
     setPvpSecondsLeft(null);
+    setPvpRevealAll(false);
   }
   function goMenu() {
     resetGameState();
@@ -482,6 +496,7 @@ export default function App() {
       // ВСТАЁМ в очередь по этой ставке и ждём match-found/state
       setIsQueueing(true);
       setPvpMode(true); // готовимся к PvP
+      setPvpRevealAll(false);
       socket.emit("queue", { stake: bet });
       setScreen("menu"); // экран ожидания
       setSecondsLeft(null);
@@ -733,12 +748,20 @@ export default function App() {
         <div className="flex items-center justify-between">
           <span className="text-white/70 text-sm">Оппонент</span>
           <span className="text-white/70 text-sm">
-            {pvpMode ? (oppScore ?? "?") : revealed || turn !== "dealer" ? dVal : "?"}
+            {pvpMode ? (pvpRevealAll ? dVal : oppPublicScore ?? "?") : revealed || turn !== "dealer" ? dVal : "?"}
           </span>
         </div>
         <div className="flex gap-2 mt-2">
-          {(pvpMode ? dealer : dealer).map((c, i) => (
-            <CardView key={i} c={c} hidden={!pvpMode && i === 0 && !revealed && turn !== "end" && turn !== "dealer"} />
+          {dealer.map((c, i) => (
+            <CardView
+              key={i}
+              c={c}
+              hidden={
+                pvpMode
+                  ? !pvpRevealAll && i >= 2 // в PvP до конца раунда показываем только первые две карты
+                  : i === 0 && !revealed && turn !== "end" && turn !== "dealer" // solo: первая скрыта до хода дилера/конца
+              }
+            />
           ))}
         </div>
       </div>
