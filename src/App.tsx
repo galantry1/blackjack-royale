@@ -306,16 +306,33 @@ export default function App() {
     catch { setLeaders([]); }
   }
 
-  /* ======== PvP подписки ======== */
+  /* ======== PvP типы и подписки ======== */
+
+  type PvPHandState = { hand: Card[]; score: number; stood?: boolean };
+  type MatchFoundPayload = { roomId: string };
+  type StatePayload = {
+    roomId: string;
+    you: PvPHandState;
+    opp: PvPHandState;
+    deadline?: number;
+    stake?: number;
+  };
+  type ResultPayload = {
+    roomId: string;
+    you: number;   // итоговая сумма очков игрока (для истории)
+    opp: number;   // итоговая сумма очков оппонента
+    result: Exclude<Result, null>;
+  };
+
   useEffect(() => {
-    function onMatchFound({ roomId }) {
+    function onMatchFound({ roomId }: MatchFoundPayload) {
       setIsQueueing(false);
       setCurrentRoom(roomId);
       setPvpMode(true);
       socket.emit("ready", { roomId });
       setScreen("game");
     }
-    function onState({ roomId, you, opp, deadline, stake }) {
+    function onState({ roomId, you, opp, deadline, stake }: StatePayload) {
       if (currentRoom && roomId !== currentRoom) return;
       setStakeOnServer(stake ?? stakeOnServer);
       setPlayer(you.hand);
@@ -325,13 +342,13 @@ export default function App() {
       setOppStood(!!opp.stood);
 
       // раскрываем карты оппонента только после того, как оба закончили
-      const reveal = (!!you.stood && !!opp.stood);
+      const reveal = !!you.stood && !!opp.stood;
       setRevealed(reveal);
 
-      setTurn(reveal ? "end" : (you.stood ? "dealer" : "player"));
+      setTurn(reveal ? "end" : you.stood ? "dealer" : "player");
       setDeadlineMs(deadline || null);
     }
-    function onResult({ roomId, you, opp, result }) {
+    function onResult({ roomId, you, opp, result }: ResultPayload) {
       if (currentRoom && roomId !== currentRoom) return;
 
       setRoundResult(result);
@@ -499,7 +516,6 @@ export default function App() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-white tracking-wide">21 • 1 на 1</h1>
-          <p className="text-white/60 text-sm mt-1">Минимализм • чёрный + синий</p>
         </div>
         <Pill>Баланс: {balance}</Pill>
       </div>
@@ -531,13 +547,6 @@ export default function App() {
             Дурак
           </div>
         </Button>
-      </div>
-
-      <div className="mt-6 p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
-        <h3 className="text-white/90 font-semibold">Правила (кратко)</h3>
-        <p className="text-white/60 text-sm mt-2 leading-relaxed">
-          Цель — сумма ближе к 21, не перебрав. Туз = 1 или 11. В PvP у оппонента видна только сумма до конца раунда.
-        </p>
       </div>
 
       <ShuffleDeck />

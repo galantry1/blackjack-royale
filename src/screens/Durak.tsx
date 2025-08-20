@@ -6,7 +6,7 @@ import DurakSkin from "./DurakSkin";
 
 type Card = { rank: string; suit: string };
 type TablePair = { a: Card; d?: Card | null };
-const cn = (...a:(string|false|undefined)[]) => a.filter(Boolean).join(" ");
+const cn = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ");
 
 export default function DurakScreen({
   userId, balance, setBalance, goBack,
@@ -90,11 +90,16 @@ export default function DurakScreen({
       setJoining(l.id);
       const roundId = Math.random().toString(36).slice(2);
       const res = await apiBet(userId, stake, roundId);
-      if (!res.success){ alert(res.error || "Недостаточно средств"); setJoining(null); return; }
+      if (!res.success){
+        alert(res.message || "Недостаточно средств");
+        setJoining(null); 
+        return;
+      }
       setBalance(res.balance);
       socket.emit("durak:join", { lobbyId: l.id, userId });
     } finally { setJoining(null); }
   }
+
   function onClickCard(c:Card){
     if (!lobbyId) return;
     const emptyDefIndex = table.findIndex(p=>!p.d);
@@ -107,6 +112,7 @@ export default function DurakScreen({
       socket.emit("durak:move", { lobbyId, userId, action, payload:{ card: c }});
     }
   }
+
   const take = ()=> lobbyId && socket.emit("durak:move", { lobbyId, userId, action:"take" });
   const bito = ()=> lobbyId && socket.emit("durak:move", { lobbyId, userId, action:"bito" });
 
@@ -116,7 +122,7 @@ export default function DurakScreen({
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <button onClick={goBack} className="h-9 px-3 rounded-xl border border-white/10 text-white bg-white/5">Назад</button>
-            <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-white/80 text-xs">Баланс: {balance}</div>
+            <div className="px-3 py-1 rounded-full bg白/5 border border-white/10 text-white/80 text-xs">Баланс: {balance}</div>
           </div>
           <h2 className="text-xl font-semibold text-white">Дурак (подкидной, 36)</h2>
 
@@ -183,25 +189,11 @@ export default function DurakScreen({
           onCardClick={onClickCard}
           onTake={take}
           onBito={bito}
-          // НОВОЕ: роль для подписи кнопки даже когда она disabled
           role={meIsDefender ? "defender" : meIsAttacker ? "attacker" : "none"}
         />
       )}
     </div>
   );
-
-  function onClickCard(c:Card){
-    if (!lobbyId) return;
-    const emptyDefIndex = table.findIndex(p=>!p.d);
-    if (meIsDefender && emptyDefIndex>=0){
-      socket.emit("durak:move", { lobbyId, userId, action:"defend", payload:{ index: emptyDefIndex, card: c }});
-      return;
-    }
-    if (meIsAttacker){
-      const action = table.some(p=>p.d) ? "throw" : "attack";
-      socket.emit("durak:move", { lobbyId, userId, action, payload:{ card: c }});
-    }
-  }
 }
 
 function short(id:string){
