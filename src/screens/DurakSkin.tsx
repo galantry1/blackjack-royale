@@ -54,15 +54,15 @@ export default function DurakSkin({
     };
   }, [canTake, canBito, opp.isTurn]);
 
-  // прогресс для круга (60 секунд)
+  // прогресс круга (60 секунд)
   const total = 60;
   const sec = secondsLeft ?? total;
-  const C = 2 * Math.PI * 18; // окружность круга r=18
+  const C = 2 * Math.PI * 18; // окружность r=18
 
   return (
     <div
       className="relative w-full max-w-md mx-auto"
-      style={{ height: "calc(100dvh - 96px)" }} // никакой прокрутки поля
+      style={{ height: "calc(100dvh - 96px)" }} // игровое поле без прокрутки
     >
       {/* Стол */}
       <div
@@ -77,12 +77,21 @@ export default function DurakSkin({
         <div className="absolute left-4 top-3 right-4 flex items-start justify-between pointer-events-none select-none">
           <div className="text-white/80 text-sm">
             <div className="flex items-center gap-3">
-              <div className="text-white/90">сброс: <b>{discardCount}</b></div>
+              <div className="text-white/90">
+                сброс: <b>{discardCount}</b>
+              </div>
 
-              {/* Таймер-кольцо */}
-              <div className="relative w-9 h-9">
+              {/* Таймер-кольцо — чуть левее, не наезжает */}
+              <div className="relative w-9 h-9" style={{ marginLeft: -6 }}>
                 <svg width="36" height="36" viewBox="0 0 40 40">
-                  <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,.12)" strokeWidth="3" fill="none" />
+                  <circle
+                    cx="20"
+                    cy="20"
+                    r="18"
+                    stroke="rgba(255,255,255,.12)"
+                    strokeWidth="3"
+                    fill="none"
+                  />
                   <circle
                     cx="20"
                     cy="20"
@@ -92,7 +101,9 @@ export default function DurakSkin({
                     fill="none"
                     strokeLinecap="round"
                     strokeDasharray={C}
-                    strokeDashoffset={C * (1 - Math.min(1, Math.max(0, sec / total)))}
+                    strokeDashoffset={
+                      C * (1 - Math.min(1, Math.max(0, sec / total)))
+                    }
                     style={{ transition: "stroke-dashoffset 250ms linear" }}
                   />
                 </svg>
@@ -128,7 +139,7 @@ export default function DurakSkin({
               {deckCount}
             </div>
 
-            {/* бейдж козыря (всегда виден) */}
+            {/* бейдж козыря */}
             <div
               className="px-2 py-1 rounded-xl text-sm font-semibold"
               style={{
@@ -145,8 +156,8 @@ export default function DurakSkin({
           </div>
         </div>
 
-        {/* Центр: стол */}
-        <div className="absolute inset-x-4 top-20 bottom-[170px]">
+        {/* Центр: стол — поднят выше, больше места под руку */}
+        <div className="absolute inset-x-4 top-16 bottom-[210px]">
           <TableView table={table} suitColor={suitColor} cardShadow={cardShadow} />
         </div>
 
@@ -203,13 +214,13 @@ function HandFan({
   const wrapRef = useRef<HTMLDivElement>(null);
   const [focusIdx, setFocusIdx] = useState<number | null>(null);
 
-  // Геометрия: ряд (<=5) или веер (>5)
+  // Геометрия: ряд (<=4) или веер (>=5)
   const geom = useMemo(() => {
     const n = Math.max(1, hand.length);
-    const flat = n <= 5;
+    const flat = n <= 4; // было 5 — теперь 4
 
     if (flat) {
-      const gap = 90; // px
+      const gap = 92; // немногим шире, чтобы 4 карты красиво влезали
       const start = -((n - 1) / 2) * gap;
       return hand.map((_, i) => ({
         baseRot: 0,
@@ -235,7 +246,10 @@ function HandFan({
     const r = el.getBoundingClientRect();
     const x = Math.max(0, Math.min(r.width, clientX - r.left));
     if (hand.length <= 1) return 0;
-    return Math.max(0, Math.min(hand.length - 1, Math.round(((hand.length - 1) * x) / r.width)));
+    return Math.max(
+      0,
+      Math.min(hand.length - 1, Math.round(((hand.length - 1) * x) / r.width))
+    );
   }
 
   const onMove = (clientX: number) => setFocusIdx(indexFromClientX(clientX));
@@ -247,7 +261,7 @@ function HandFan({
         position: "absolute",
         left: 0,
         right: 0,
-        bottom: "calc(84px + env(safe-area-inset-bottom) + 56px)",
+        bottom: "calc(92px + env(safe-area-inset-bottom) + 56px)", // немного выше
         height: 200,
       }}
     >
@@ -263,10 +277,23 @@ function HandFan({
         {hand.map((c, i) => {
           const g = geom[i];
           const d = focusIdx == null ? 99 : Math.abs(i - focusIdx);
-          const scale = focusIdx == null ? 1 : d === 0 ? 1.14 : d === 1 ? 1.07 : d === 2 ? 1.03 : 1;
-          const lift = focusIdx == null ? 0 : d === 0 ? 18 : d === 1 ? 10 : d === 2 ? 6 : 0;
+          const scale =
+            focusIdx == null
+              ? 1
+              : d === 0
+              ? 1.14
+              : d === 1
+              ? 1.07
+              : d === 2
+              ? 1.03
+              : 1;
+          const lift =
+            focusIdx == null ? 0 : d === 0 ? 18 : d === 1 ? 10 : d === 2 ? 6 : 0;
           const spread =
-            focusIdx == null ? 0 : (i - (focusIdx as number)) * (d === 0 ? 0 : d === 1 ? 12 : d === 2 ? 6 : 0);
+            focusIdx == null
+              ? 0
+              : (i - (focusIdx as number)) *
+                (d === 0 ? 0 : d === 1 ? 12 : d === 2 ? 6 : 0);
           const z = 10 + (focusIdx == null ? i : 100 - d * 10);
 
           return (
@@ -275,9 +302,11 @@ function HandFan({
               className="absolute left-1/2 pointer-events-auto"
               style={{
                 bottom: 0,
-                transform: `translateX(-50%) translateX(${g.baseX + spread}px) translateY(${g.baseY - lift
-                  }px) rotate(${g.baseRot}deg) scale(${scale})`,
-                transition: "transform 140ms ease, box-shadow 140ms ease, filter 140ms ease",
+                transform: `translateX(-50%) translateX(${g.baseX + spread}px) translateY(${
+                  g.baseY - lift
+                }px) rotate(${g.baseRot}deg) scale(${scale})`,
+                transition:
+                  "transform 140ms ease, box-shadow 140ms ease, filter 140ms ease",
                 zIndex: z,
               }}
               onClick={() => onCardClick(c)}
@@ -373,7 +402,7 @@ function TableView({
     );
   }
 
-  // пары в 2 ряда по центру
+  // пары — в 2 ряда по центру
   return (
     <div className="w-full h-full grid place-items-center">
       <div className="relative w-[92%] max-w-[520px] min-h-[160px]">

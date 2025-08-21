@@ -44,8 +44,27 @@ export default function DurakScreen({
 
   const meIsAttacker = attacker === userId;
   const meIsDefender = defender === userId;
-  const oppPlayer = players.find((p) => p.userId !== userId) || { userId: "", handCount: 0 };
-  const oppTurn = !!oppPlayer?.userId && (attacker === oppPlayer.userId || defender === oppPlayer.userId);
+  const oppPlayer =
+    players.find((p) => p.userId !== userId) || { userId: "", handCount: 0 };
+  const oppTurn =
+    !!oppPlayer?.userId &&
+    (attacker === oppPlayer.userId || defender === oppPlayer.userId);
+
+  /* ===== Прячем нижнюю навигацию во время игры (возвращаем при выходе) ===== */
+  useEffect(() => {
+    const toggle = (show: boolean) => {
+      const navs = document.querySelectorAll("nav");
+      navs.forEach((n) => {
+        (n as HTMLElement).style.display = show ? "" : "none";
+      });
+    };
+    if (step === "game") {
+      toggle(false);
+    } else {
+      toggle(true);
+    }
+    return () => toggle(true);
+  }, [step]);
 
   /* ===== Блокируем прокрутку, пока идёт игра ===== */
   useEffect(() => {
@@ -102,7 +121,9 @@ export default function DurakScreen({
       setDeadlineMs(s.deadline || null);
     }
     function onEnded({ winner, stake }: any) {
-      alert(winner === userId ? `Победа! +${stake + Math.floor(stake * 0.9)}` : "Поражение");
+      alert(
+        winner === userId ? `Победа! +${stake + Math.floor(stake * 0.9)}` : "Поражение"
+      );
       setStep("menu");
       setLobbyId(null);
       setHand([]);
@@ -189,8 +210,10 @@ export default function DurakScreen({
     }
   }
 
-  const take = () => lobbyId && socket.emit("durak:move", { lobbyId, userId, action: "take" });
-  const bito = () => lobbyId && socket.emit("durak:move", { lobbyId, userId, action: "bito" });
+  const take = () =>
+    lobbyId && socket.emit("durak:move", { lobbyId, userId, action: "take" });
+  const bito = () =>
+    lobbyId && socket.emit("durak:move", { lobbyId, userId, action: "bito" });
 
   return (
     <div className={cn("p-4", step === "game" && "touch-none")}>
@@ -276,7 +299,9 @@ export default function DurakScreen({
           <h3 className="text-white/90 font-semibold">Лобби (2 игрока)</h3>
 
           {disabledMode && (
-            <div className="text-white/70 text-sm">Режим на {playersCount} игроков пока недоступен.</div>
+            <div className="text-white/70 text-sm">
+              Режим на {playersCount} игроков пока недоступен.
+            </div>
           )}
           {!disabledMode && lobbies.length === 0 && (
             <div className="text-white/60">Пусто. Обнови или зайди позже.</div>
