@@ -1,218 +1,401 @@
-import React, {useEffect, useMemo, useRef, useState} from "react";
-import {motion} from "framer-motion";
-import {Flag, Hourglass, Handshake, Info, Coins, Crown, Check} from "lucide-react";
+// src/screens/DurakSkin.tsx
+import React, { useMemo, useRef, useState } from "react";
 
-export type Card = { rank: string; suit: string; id?: string };
-export type TablePair = { a: Card; d?: Card | null };
+type Suit = "♠" | "♥" | "♦" | "♣";
+type Card = { rank: string; suit: Suit };
+type TablePair = { a: Card; d?: Card | null };
 
-export type DurakSkinProps = {
-  trump: string; deckCount: number; discardCount?: number; table: TablePair[];
-  me: { name: string; avatarUrl?: string; isTurn: boolean; balance?: number };
-  opp: { name: string; avatarUrl?: string; isTurn: boolean; handCount: number };
-  hand: Card[]; canTake?: boolean; canBito?: boolean; stake?: number;
-  onCardClick?: (card: Card) => void; onTake?: () => void; onBito?: () => void;
-  role?: "attacker" | "defender" | "none";
-};
+export default function DurakSkin({
+  trump,
+  deckCount,
+  discardCount,
+  table,
+  me,
+  opp,
+  hand,
+  canTake,
+  canBito,
+  stake,
+  secondsLeft,
+  onCardClick,
+  onTake,
+  onBito,
+  role,
+}: {
+  trump: Suit;
+  deckCount: number;
+  discardCount: number;
+  table: TablePair[];
+  me: { name: string; avatarUrl: string; isTurn: boolean; balance: number };
+  opp: { name: string; avatarUrl: string; isTurn: boolean; handCount: number };
+  hand: Card[];
+  canTake: boolean;
+  canBito: boolean;
+  stake: number;
+  secondsLeft: number | null;
+  onCardClick: (c: Card) => void;
+  onTake: () => void;
+  onBito: () => void;
+  role: "attacker" | "defender" | "none";
+}) {
+  const isRed = (s: Suit) => s === "♥" || s === "♦";
+  const suitColor = (s: Suit) => (isRed(s) ? "#ff5d72" : "#38d39f");
+  const cardShadow =
+    "0 14px 28px -16px rgba(0,0,0,.8), inset 0 0 0 1px rgba(0,0,0,.03)";
 
-const isRed = (s:string)=> s==="♥"||s==="♦";
-const suitColorClass = (s:string)=> (isRed(s) ? "text-[#E23A4E]" : "text-[#111827]");
-const suitBgClass   = (s:string)=> (isRed(s) ? "bg-[#FFF5F6]" : "bg-white");
+  // подпись на кнопке
+  const mainBtn = useMemo(() => {
+    if (canTake) return { label: "Беру", kind: "take" as const, enabled: true };
+    if (canBito) return { label: "Бито", kind: "bito" as const, enabled: true };
+    return {
+      label: opp.isTurn ? "Ход соперника…" : "Ждём…",
+      kind: "none" as const,
+      enabled: false,
+    };
+  }, [canTake, canBito, opp.isTurn]);
 
-/* ---------- layout wrappers ---------- */
-function Felt({children}:{children:React.ReactNode}) {
-  return (
-    <div className="relative mx-auto h-[100svh] w-full max-w-[820px] overflow-hidden bg-felt text-white">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(255,255,255,0.06),transparent_60%)]" />
-      {children}
-    </div>
-  );
-}
-function TopHUD({ stake=0, balance=0 }:{stake?:number; balance?:number}) {
-  return (
-    <div className="absolute left-0 right-0 top-0 z-20 flex items-center justify-between px-3 pt-2 text-white/95">
-      <div className="flex items-center gap-2 opacity-80">
-        <Flag className="h-5 w-5"/><Hourglass className="h-5 w-5"/><Handshake className="h-5 w-5"/><Info className="h-5 w-5"/>
-      </div>
-      <div className="flex items-center gap-2 text-[15px] font-semibold">
-        {stake>0 && <span className="inline-flex items-center gap-1 rounded-xl bg-white/10 px-2 py-1 backdrop-blur"><Crown className="h-4 w-4"/>{stake}</span>}
-        <span className="inline-flex items-center gap-1 rounded-xl bg-white/10 px-2 py-1 backdrop-blur"><Coins className="h-4 w-4"/>{balance}</span>
-      </div>
-    </div>
-  );
-}
-
-/* ---------- small atoms ---------- */
-function AvatarBadge({name, avatarUrl, isTurn, count}:{name:string; avatarUrl?:string; isTurn:boolean; count?:number}){
-  return (
-    <div className="relative">
-      <div className={"mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-white/10 shadow-xl ring-2 ring-offset-2 ring-offset-black/20 backdrop-blur "+(isTurn?" ring-[#36FF6C] drop-shadow-[0_0_12px_#36FF6C]":" ring-[#FF4D4D] drop-shadow-[0_0_10px_#FF4D4D]")}>
-        {avatarUrl ? <img src={avatarUrl} className="h-full w-full rounded-2xl object-cover" alt={name}/> : <div className="flex h-full w-full items-center justify-center rounded-2xl bg-white/10 text-xs font-semibold">{name?.[0]||"?"}</div>}
-      </div>
-      <div className="mt-1 text-center text-xs text-white/90">
-        <div className="truncate max-w-[80px]">{name||"—"}</div>
-        {typeof count==="number" && <div className="text-[10px] text-white/70">карты: {count}</div>}
-      </div>
-    </div>
-  );
-}
-function CardFace({ card, onClick }:{card:Card; onClick?:()=>void}) {
-  const color=suitColorClass(card.suit), bg=suitBgClass(card.suit);
-  const isFace=card.rank==="К"||card.rank==="Д"||card.rank==="В";
-  const isAce =card.rank==="Т";
-  return (
-    <motion.button whileTap={{scale:0.98}} onClick={onClick}
-      className={`relative aspect-[64/89] w-[68px] select-none rounded-2xl ${bg} shadow-[0_6px_16px_rgba(0,0,0,0.35)] ring-1 ring-black/10`}>
-      <div className="absolute inset-0 rounded-2xl bg-[linear-gradient(180deg,rgba(255,255,255,0.5),transparent_40%,transparent_60%,rgba(255,255,255,0.08))]" />
-      <div className="absolute inset-1 rounded-xl border border-black/10" />
-      <div className={`absolute left-1 top-1 text-[14px] font-bold leading-none ${color}`}>{card.rank}<div>{card.suit}</div></div>
-      <div className={`absolute bottom-1 right-1 rotate-180 text-[14px] font-bold leading-none ${color}`}>{card.rank}<div>{card.suit}</div></div>
-      <div className={`absolute inset-0 grid place-items-center ${isFace?"text-base":isAce?"text-5xl":"text-3xl"} ${color}`}>
-        {isFace?card.rank:card.suit}
-      </div>
-    </motion.button>
-  );
-}
-function CardBack({className=""}:{className?:string}) {
-  return <div className={`aspect-[64/89] w-[68px] rounded-xl bg-card-back shadow-[0_6px_16px_rgba(0,0,0,0.35)] ring-1 ring-black/10 ${className}`}/>;
-}
-function TablePairs({pairs}:{pairs:TablePair[]}) {
-  return (
-    <div className="mx-auto grid max-w-[560px] grid-cols-2 gap-4 px-4 pt-16">
-      {pairs.map((p,idx)=>(
-        <div key={idx} className="relative h-[calc(68px*1.4)] w-[180px] max-w-full">
-          <motion.div initial={{y:-10,opacity:0}} animate={{y:0,opacity:1}} transition={{type:"spring",stiffness:260,damping:24}} className="absolute left-0 top-0"><CardFace card={p.a}/></motion.div>
-          {p.d && <motion.div initial={{y:10,rotate:8,opacity:0}} animate={{y:6,rotate:8,opacity:1}} transition={{type:"spring",stiffness:260,damping:24}} className="absolute left-6 top-4"><CardFace card={p.d}/></motion.div>}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/* ---------- HAND (fixed + true center on table width) ---------- */
-function HandSmart({ hand, onCardClick }:{ hand:Card[]; onCardClick?: (c:Card)=>void }) {
-  // ВАЖНО: измеряем ширину именно ВНУТРЕННЕГО контейнера стола (max-w-[640px]),
-  // а не всего окна — так рука центрируется идеально.
-  const wrapRef = useRef<HTMLDivElement|null>(null);
-  const [width, setWidth] = useState(360);
-  const [focus, setFocus] = useState<number|null>(null);
-
-  useEffect(()=>{
-    const el = wrapRef.current; if(!el) return;
-    const update = ()=> setWidth(el.clientWidth || el.getBoundingClientRect().width || 360);
-    const RO = (window as any).ResizeObserver; const ro = RO? new RO(update):null;
-    update(); ro?.observe(el); window.addEventListener("resize", update);
-    return ()=>{ ro?.disconnect(); window.removeEventListener("resize", update); };
-  },[]);
-
-  // раскладка: ≤5 — без веера (широко), 6–7 — полу-веер, overflow — узкий веер.
-  const layout = useMemo(()=>{
-    const n = hand.length, cardW = 68;
-    if (n===0) return {items:[], height: cardW*1.7};
-    let gap   = n<=5 ? cardW*0.95 : n<=7 ? cardW*0.7 : cardW*0.35;
-    let span  = n<=5 ? 0          : n<=7 ? 10         : 0;  // deg
-    const totalIdeal = n>1 ? cardW + gap*(n-1) : cardW;
-    if (totalIdeal > width - 24) {              // не влазит
-      const overflowRatio = totalIdeal / Math.max(140, width-24);
-      gap  = Math.max(cardW*0.18, gap/overflowRatio);
-      span = Math.max(span, 12);
-    }
-    const step = n>1 ? span/(n-1) : 0;
-    const startAng = -span/2;
-    const startX   = -((n-1)*gap)/2;
-    const items = hand.map((c,i)=>({ c, i, x: startX + i*gap, rot: startAng + i*step }));
-    return {items, height: cardW*1.7};
-  },[hand, width]);
-
-  const onPointerMove = (clientX:number)=>{
-    const el = wrapRef.current; if(!el) return;
-    const rect = el.getBoundingClientRect();
-    const x = clientX - (rect.left + rect.width/2);
-    let best = 0, bestDist = Infinity;
-    layout.items.forEach(it=>{ const d=Math.abs(x-it.x); if(d<bestDist){bestDist=d; best=it.i;} });
-    setFocus(best);
-  };
+  // прогресс для круга (60 секунд)
+  const total = 60;
+  const sec = secondsLeft ?? total;
+  const C = 2 * Math.PI * 18; // окружность круга r=18
 
   return (
     <div
-      className="pointer-events-auto fixed left-0 right-0 z-30"
-      style={{ bottom: "calc(160px + env(safe-area-inset-bottom))" }}  // рука строго над кнопкой
-      onMouseLeave={()=>setFocus(null)}
-      onTouchEnd={()=>setFocus(null)}
-      onMouseMove={(e)=>onPointerMove(e.clientX)}
-      onTouchMove={(e)=>{ if(e.touches?.[0]) onPointerMove(e.touches[0].clientX); }}
+      className="relative w-full max-w-md mx-auto"
+      style={{ height: "calc(100dvh - 96px)" }} // никакой прокрутки поля
     >
-      {/* ЦЕНТР: ровно как стол — max-w-[640px] */}
-      <div ref={wrapRef} className="relative mx-auto w-full max-w-[640px] px-3" style={{height: layout.height}}>
-        {layout.items.map(({c,i,x,rot})=>(
-          <motion.div key={c.id || `${c.rank}${c.suit}${i}`} style={{ left:"50%", transform:`translateX(${x}px) rotate(${rot}deg)` }} className="absolute bottom-0">
-            <motion.div animate={ i===focus ? { y:-10, scale:1.08 } : { y:0, scale:1 } } transition={{ type:"spring", stiffness:300, damping:24 }}>
-              <CardFace card={c} onClick={()=>onCardClick?.(c)} />
-            </motion.div>
-          </motion.div>
-        ))}
+      {/* Стол */}
+      <div
+        className="absolute inset-0 rounded-[24px] border border-white/10"
+        style={{
+          background:
+            "radial-gradient(80% 60% at 50% 20%, rgba(33,118,255,.18), rgba(10,15,20,.75))",
+          boxShadow: "inset 0 0 160px rgba(0,0,0,.35)",
+        }}
+      >
+        {/* Верхняя панель */}
+        <div className="absolute left-4 top-3 right-4 flex items-start justify-between pointer-events-none select-none">
+          <div className="text-white/80 text-sm">
+            <div className="flex items-center gap-3">
+              <div className="text-white/90">сброс: <b>{discardCount}</b></div>
+
+              {/* Таймер-кольцо */}
+              <div className="relative w-9 h-9">
+                <svg width="36" height="36" viewBox="0 0 40 40">
+                  <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,.12)" strokeWidth="3" fill="none" />
+                  <circle
+                    cx="20"
+                    cy="20"
+                    r="18"
+                    stroke="#38d39f"
+                    strokeWidth="3"
+                    fill="none"
+                    strokeLinecap="round"
+                    strokeDasharray={C}
+                    strokeDashoffset={C * (1 - Math.min(1, Math.max(0, sec / total)))}
+                    style={{ transition: "stroke-dashoffset 250ms linear" }}
+                  />
+                </svg>
+                <div className="absolute inset-0 grid place-items-center text-white text-xs">
+                  {Math.max(0, Math.min(total, sec))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Колода + козырь справа компактно */}
+          <div className="relative flex items-center gap-2">
+            <div className="relative">
+              <div
+                className="w-12 h-16 rounded-2xl bg-white/80"
+                style={{
+                  background:
+                    "repeating-linear-gradient(45deg, rgba(56,211,159,.25) 0 8px, rgba(56,211,159,.15) 8px 16px)",
+                  boxShadow: cardShadow,
+                }}
+              />
+              <div
+                className="absolute -top-1 -left-1 w-12 h-16 rounded-2xl opacity-70"
+                style={{
+                  background:
+                    "repeating-linear-gradient(45deg, rgba(56,211,159,.25) 0 8px, rgba(56,211,159,.15) 8px 16px)",
+                  boxShadow: cardShadow,
+                }}
+              />
+            </div>
+
+            <div className="text-white font-semibold text-xl leading-none">
+              {deckCount}
+            </div>
+
+            {/* бейдж козыря (всегда виден) */}
+            <div
+              className="px-2 py-1 rounded-xl text-sm font-semibold"
+              style={{
+                background: "rgba(255,255,255,.08)",
+                border: "1px solid rgba(255,255,255,.12)",
+                color: suitColor(trump),
+                boxShadow: "0 6px 24px -12px rgba(0,0,0,.6)",
+              }}
+            >
+              {trump}
+            </div>
+
+            <div className="ml-2 text-white/70 text-sm">ставка: {stake}</div>
+          </div>
+        </div>
+
+        {/* Центр: стол */}
+        <div className="absolute inset-x-4 top-20 bottom-[170px]">
+          <TableView table={table} suitColor={suitColor} cardShadow={cardShadow} />
+        </div>
+
+        {/* Рука игрока — интерактивная, выше кнопки */}
+        <HandFan
+          hand={hand}
+          onCardClick={onCardClick}
+          suitColor={suitColor}
+          cardShadow={cardShadow}
+        />
+
+        {/* Главная кнопка — низ по центру */}
+        <div
+          className="absolute left-0 right-0 grid place-items-center"
+          style={{ bottom: "calc(24px + env(safe-area-inset-bottom))" }}
+        >
+          <button
+            disabled={!mainBtn.enabled}
+            onClick={() => {
+              if (mainBtn.kind === "take") onTake();
+              if (mainBtn.kind === "bito") onBito();
+            }}
+            className="h-12 px-6 rounded-2xl border text-white backdrop-blur-md disabled:opacity-60"
+            style={{
+              minWidth: 220,
+              background: mainBtn.enabled
+                ? "linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.06))"
+                : "rgba(255,255,255,.06)",
+              borderColor: "rgba(255,255,255,.12)",
+              boxShadow: "0 10px 40px -20px rgba(0,0,0,.7)",
+            }}
+          >
+            {mainBtn.label}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-/* ---------- main ---------- */
-export default function DurakSkin(props: DurakSkinProps){
-  const { trump, deckCount, discardCount=0, table, me, opp, hand, canTake=false, canBito=false, stake=0, onCardClick, onTake, onBito, role="none" } = props;
+/* =================== Hand (веер + увеличение на фокусе) =================== */
 
-  const wantAction: "take" | "bito" | null = role==="defender" ? "take" : role==="attacker" ? "bito" : null;
-  const actionable = (wantAction==="take" && canTake) || (wantAction==="bito" && canBito);
+function HandFan({
+  hand,
+  onCardClick,
+  suitColor,
+  cardShadow,
+}: {
+  hand: Card[];
+  onCardClick: (c: Card) => void;
+  suitColor: (s: Suit) => string;
+  cardShadow: string;
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [focusIdx, setFocusIdx] = useState<number | null>(null);
+
+  // Геометрия: ряд (<=5) или веер (>5)
+  const geom = useMemo(() => {
+    const n = Math.max(1, hand.length);
+    const flat = n <= 5;
+
+    if (flat) {
+      const gap = 90; // px
+      const start = -((n - 1) / 2) * gap;
+      return hand.map((_, i) => ({
+        baseRot: 0,
+        baseX: start + i * gap,
+        baseY: 0,
+      }));
+    }
+
+    const spreadDeg = Math.min(70, 10 + 3 * hand.length);
+    const startDeg = -spreadDeg / 2;
+    const stepDeg = hand.length > 1 ? spreadDeg / (hand.length - 1) : 0;
+    const stepX = Math.max(26, 36 - Math.max(0, hand.length - 8) * 2);
+    return hand.map((_, i) => ({
+      baseRot: startDeg + i * stepDeg,
+      baseX: (i - (hand.length - 1) / 2) * stepX,
+      baseY: Math.abs(startDeg + i * stepDeg) * 0.8,
+    }));
+  }, [hand]);
+
+  function indexFromClientX(clientX: number) {
+    const el = wrapRef.current;
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const x = Math.max(0, Math.min(r.width, clientX - r.left));
+    if (hand.length <= 1) return 0;
+    return Math.max(0, Math.min(hand.length - 1, Math.round(((hand.length - 1) * x) / r.width)));
+  }
+
+  const onMove = (clientX: number) => setFocusIdx(indexFromClientX(clientX));
 
   return (
-    <Felt>
-      <TopHUD stake={stake} balance={me.balance || 0} />
+    <div
+      className="pointer-events-none"
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: "calc(84px + env(safe-area-inset-bottom) + 56px)",
+        height: 200,
+      }}
+    >
+      <div
+        ref={wrapRef}
+        className="relative mx-auto w-full max-w-[92%] h-full"
+        onMouseMove={(e) => onMove(e.clientX)}
+        onMouseLeave={() => setFocusIdx(null)}
+        onTouchStart={(e) => onMove(e.touches[0].clientX)}
+        onTouchMove={(e) => onMove(e.touches[0].clientX)}
+        onTouchEnd={() => setFocusIdx(null)}
+      >
+        {hand.map((c, i) => {
+          const g = geom[i];
+          const d = focusIdx == null ? 99 : Math.abs(i - focusIdx);
+          const scale = focusIdx == null ? 1 : d === 0 ? 1.14 : d === 1 ? 1.07 : d === 2 ? 1.03 : 1;
+          const lift = focusIdx == null ? 0 : d === 0 ? 18 : d === 1 ? 10 : d === 2 ? 6 : 0;
+          const spread =
+            focusIdx == null ? 0 : (i - (focusIdx as number)) * (d === 0 ? 0 : d === 1 ? 12 : d === 2 ? 6 : 0);
+          const z = 10 + (focusIdx == null ? i : 100 - d * 10);
 
-      {/* верх */}
-      <div className="pt-10">
-        <div className="mx-auto flex max-w-[640px] items-end justify-center gap-6 px-3">
-          <div className="flex flex-col items-center gap-1 text-white/80">
-            <span className="text-lg font-bold">{discardCount}</span>
-            <span className="text-[11px]">сброс</span>
-          </div>
-          <div className="relative flex flex-col items-center">
-            <AvatarBadge name={opp.name || "-"} avatarUrl={opp.avatarUrl} isTurn={opp.isTurn} count={opp.handCount} />
-            <div className="mt-2 flex items-center gap-2">
-              <div className="relative">
-                <CardBack className="translate-x-0"/><CardBack className="absolute left-1 top-1 rotate-[-3deg]"/><CardBack className="absolute left-2 top-2 rotate-[-6deg]"/>
-              </div>
-              <div className="flex items-center gap-2 text-white/90">
-                <span className="text-2xl font-extrabold leading-none">{deckCount}</span>
-                <div className="text-xs opacity-80"><div>козырь</div><div className="mt-0.5 inline-flex items-center gap-1 rounded-md bg-white/10 px-1.5 py-0.5 text-sm"><span className="text-white">{trump}</span></div></div>
-              </div>
-            </div>
-          </div>
-          <div className="w-[56px]" />
+          return (
+            <button
+              key={i}
+              className="absolute left-1/2 pointer-events-auto"
+              style={{
+                bottom: 0,
+                transform: `translateX(-50%) translateX(${g.baseX + spread}px) translateY(${g.baseY - lift
+                  }px) rotate(${g.baseRot}deg) scale(${scale})`,
+                transition: "transform 140ms ease, box-shadow 140ms ease, filter 140ms ease",
+                zIndex: z,
+              }}
+              onClick={() => onCardClick(c)}
+            >
+              <CardView c={c} suitColor={suitColor} cardShadow={cardShadow} />
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ================= Cards & Table ================= */
+
+function CardView({
+  c,
+  suitColor,
+  cardShadow,
+}: {
+  c: Card;
+  suitColor: (s: Suit) => string;
+  cardShadow: string;
+}) {
+  const red = c.suit === "♥" || c.suit === "♦";
+
+  return (
+    <div
+      className="w-[72px] h-[104px] sm:w-[80px] sm:h-[116px] rounded-2xl grid"
+      style={{
+        gridTemplateRows: "1fr auto 1fr",
+        background: "linear-gradient(180deg, #ffffff, #f4f6fa)",
+        border: "1px solid rgba(0,0,0,.06)",
+        boxShadow: cardShadow,
+        willChange: "transform",
+      }}
+    >
+      {/* верхний угол — масть */}
+      <div
+        className="p-2 text-xs font-semibold"
+        style={{ color: suitColor(c.suit) }}
+      >
+        {c.suit}
+      </div>
+
+      {/* центр — крупный номинал */}
+      <div className="grid place-items-center">
+        <div
+          className="font-extrabold tracking-wider"
+          style={{
+            fontSize: 28,
+            color: red ? "#ff5d72" : "#38d39f",
+            textShadow: "0 1px 0 rgba(0,0,0,.15)",
+          }}
+        >
+          {c.rank}
         </div>
       </div>
 
-      {/* стол */}
-      <TablePairs pairs={table} />
+      {/* нижний угол — масть */}
+      <div
+        className="p-2 text-xs font-semibold justify-self-end self-end"
+        style={{ color: suitColor(c.suit) }}
+      >
+        {c.suit}
+      </div>
+    </div>
+  );
+}
 
-      {/* рука (фикс + идеальный центр по ширине стола) */}
-      <HandSmart hand={hand} onCardClick={onCardClick} />
-
-      {/* одна кнопка по центру снизу, всегда видна; пульс когда активна */}
-      {wantAction && (
-        <div className="fixed left-1/2 z-40 -translate-x-1/2" style={{ bottom: "calc(88px + env(safe-area-inset-bottom))" }}>
-          {wantAction === "take" ? (
-            <button disabled={!actionable} onClick={onTake}
-              className={"h-12 min-w-[170px] rounded-2xl px-6 text-lg font-bold shadow-xl transition-all "+
-                (actionable ? "bg-white text-[#E23A4E] ring-2 ring-[#ffccd4] animate-pulse" : "bg-white/40 text-white/60")}>
-              Беру
-            </button>
-          ) : (
-            <button disabled={!actionable} onClick={onBito}
-              className={"h-12 min-w-[170px] rounded-2xl px-6 text-lg font-bold shadow-xl transition-all "+
-                (actionable ? "bg-white text-black ring-2 ring-white/60 animate-pulse" : "bg-white/40 text-white/60")}>
-              <span className="inline-flex items-center gap-2"><Check className="h-5 w-5"/> Бито</span>
-            </button>
-          )}
+function TableView({
+  table,
+  suitColor,
+  cardShadow,
+}: {
+  table: TablePair[];
+  suitColor: (s: Suit) => string;
+  cardShadow: string;
+}) {
+  if (!table || table.length === 0) {
+    return (
+      <div className="w-full h-full grid place-items-center">
+        <div
+          className="px-4 py-3 rounded-2xl text-white/80 text-sm"
+          style={{
+            background: "rgba(255,255,255,.06)",
+            border: "1px solid rgba(255,255,255,.12)",
+          }}
+        >
+          Стол пуст — ждём карту.
         </div>
-      )}
-    </Felt>
+      </div>
+    );
+  }
+
+  // пары в 2 ряда по центру
+  return (
+    <div className="w-full h-full grid place-items-center">
+      <div className="relative w-[92%] max-w-[520px] min-h-[160px]">
+        {table.map((p, i) => {
+          const x = (i % 3) * 120 - 120;
+          const y = Math.floor(i / 3) * 130;
+          return (
+            <div
+              key={i}
+              className="absolute left-1/2"
+              style={{ transform: `translateX(-50%) translate(${x}px, ${y}px)` }}
+            >
+              <CardView c={p.a} suitColor={suitColor} cardShadow={cardShadow} />
+              {p.d && (
+                <div className="absolute left-[54px] top-[18px] rotate-12">
+                  <CardView c={p.d} suitColor={suitColor} cardShadow={cardShadow} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
