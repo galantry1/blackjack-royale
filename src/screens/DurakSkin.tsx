@@ -1,5 +1,5 @@
 // src/screens/DurakSkin.tsx
-import React, { useMemo, useRef, useState } from "react";
+import React, { useMemo, useRef, useState, useCallback } from "react";
 
 type Suit = "♠" | "♥" | "♦" | "♣";
 type Card = { rank: string; suit: Suit };
@@ -18,6 +18,7 @@ export default function DurakSkin({
   stake,
   secondsLeft,
   onCardClick,
+  onDrop,            // <— новый колбэк: (card, pairIndex|null)
   onTake,
   onBito,
   role,
@@ -34,6 +35,7 @@ export default function DurakSkin({
   stake: number;
   secondsLeft: number | null;
   onCardClick: (c: Card) => void;
+  onDrop: (c: Card, pairIndex: number | null) => void;
   onTake: () => void;
   onBito: () => void;
   role: "attacker" | "defender" | "none";
@@ -54,16 +56,75 @@ export default function DurakSkin({
     };
   }, [canTake, canBito, opp.isTurn]);
 
-  // прогресс круга (60 секунд)
+  // таймер
   const total = 60;
   const sec = secondsLeft ?? total;
-  const C = 2 * Math.PI * 18; // окружность r=18
+  const C = 2 * Math.PI * 18;
+
+  // refs для дропа
+  const tableAreaRef = useRef<HTMLDivElement>(null);
+
+  // вычисляем цель дропа по координатам
+  const getDropTarget = useCallback(
+    (x: number, y: number): number | null => {
+      const point = { x, y };
+      const inside = (r: DOMRect) =>
+        point.x >= r.left && point.x <= r.right && point.y >= r.top && point.y <= r.bottom;
+
+      // защита: искать незакрытые пары и проверять попадание в карту-атаку
+      if (role === "defender") {
+        const nodes = Array.from(
+          document.querySelectorAll<HTMLElement>('[data-attack-slot="1"]')
+        );
+        for (const el of nodes) {
+          const idx = Number(el.dataset.idx || "-1");
+          if (Number.isNaN(idx)) continue;
+          if (table[idx]?.d) continue; // уже закрыто
+          const r = el.getBoundingClientRect();
+          if (inside(r)) return idx;
+        }
+        return null;
+      }
+
+      // атака/подкидывать: попасть в область стола
+      if (role === "attacker") {
+        const r = tableAreaRef.current?.getBoundingClientRect();
+        if (r && inside(r)) return null; // null = просто на стол
+        return null; // мимо — отмена (вернём карту)
+      }
+
+      return null;
+    },
+    [role, table]
+  );
+
+  // состояние драга (рендерим оверлей карты)
+  const [drag, setDrag] = useState<{
+    card: Card;
+    idx: number;
+    x: number;
+    y: number;
+    active: boolean;
+  } | null>(null);
+
+  const startDrag = (idx: number, card: Card, x: number, y: number) =>
+    setDrag({ card, idx, x, y, active: true });
+  const moveDrag = (x: number, y: number) =>
+    setDrag((d) => (d ? { ...d, x, y } : d));
+  const endDrag = (x: number, y: number) => {
+    setDrag((d) => {
+      if (!d) return null;
+      const target = getDropTarget(x, y);
+      // defender: target = индекс пары; attacker: target === null => просто стол
+      if ((role === "defender" && target != null) || (role === "attacker" && target === null)) {
+        onDrop(d.card, target);
+      }
+      return null; // оверлей убираем (если ход невалиден — просто вернётся исходная карта)
+    });
+  };
 
   return (
-    <div
-      className="relative w-full max-w-md mx-auto"
-      style={{ height: "calc(100dvh - 96px)" }} // игровое поле без прокрутки
-    >
+    <div className="relative w-full max-w-md mx-auto" style={{ height: "calc(100dvh - 96px)" }}>
       {/* Стол */}
       <div
         className="absolute inset-0 rounded-[24px] border border-white/10"
@@ -73,37 +134,19 @@ export default function DurakSkin({
           boxShadow: "inset 0 0 160px rgba(0,0,0,.35)",
         }}
       >
-        {/* Верхняя панель */}
+        {/* Верх */}
         <div className="absolute left-4 top-3 right-4 flex items-start justify-between pointer-events-none select-none">
           <div className="text-white/80 text-sm">
             <div className="flex items-center gap-3">
-              <div className="text-white/90">
-                сброс: <b>{discardCount}</b>
-              </div>
-
-              {/* Таймер-кольцо — чуть левее, не наезжает */}
-              <div className="relative w-9 h-9" style={{ marginLeft: -6 }}>
+              <div className="text-white/90">сброс: <b>{discardCount}</b></div>
+              <div className="relative w-9 h-9 ml-1">
                 <svg width="36" height="36" viewBox="0 0 40 40">
+                  <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,.12)" strokeWidth="3" fill="none" />
                   <circle
-                    cx="20"
-                    cy="20"
-                    r="18"
-                    stroke="rgba(255,255,255,.12)"
-                    strokeWidth="3"
-                    fill="none"
-                  />
-                  <circle
-                    cx="20"
-                    cy="20"
-                    r="18"
-                    stroke="#38d39f"
-                    strokeWidth="3"
-                    fill="none"
-                    strokeLinecap="round"
+                    cx="20" cy="20" r="18"
+                    stroke="#38d39f" strokeWidth="3" fill="none" strokeLinecap="round"
                     strokeDasharray={C}
-                    strokeDashoffset={
-                      C * (1 - Math.min(1, Math.max(0, sec / total)))
-                    }
+                    strokeDashoffset={C * (1 - Math.min(1, Math.max(0, sec / total)))}
                     style={{ transition: "stroke-dashoffset 250ms linear" }}
                   />
                 </svg>
@@ -114,7 +157,7 @@ export default function DurakSkin({
             </div>
           </div>
 
-          {/* Колода + козырь справа компактно */}
+          {/* Колода/козырь */}
           <div className="relative flex items-center gap-2">
             <div className="relative">
               <div
@@ -135,11 +178,8 @@ export default function DurakSkin({
               />
             </div>
 
-            <div className="text-white font-semibold text-xl leading-none">
-              {deckCount}
-            </div>
+            <div className="text-white font-semibold text-xl leading-none">{deckCount}</div>
 
-            {/* бейдж козыря */}
             <div
               className="px-2 py-1 rounded-xl text-sm font-semibold"
               style={{
@@ -156,30 +196,28 @@ export default function DurakSkin({
           </div>
         </div>
 
-        {/* Центр: стол — поднят выше, больше места под руку */}
-        <div className="absolute inset-x-4 top-16 bottom-[210px]">
+        {/* Центр: стол (даём ref и data-атрибуты для дропа) */}
+        <div ref={tableAreaRef} className="absolute inset-x-4 top-20 bottom-[170px]">
           <TableView table={table} suitColor={suitColor} cardShadow={cardShadow} />
         </div>
 
-        {/* Рука игрока — интерактивная, выше кнопки */}
+        {/* Рука */}
         <HandFan
           hand={hand}
           onCardClick={onCardClick}
           suitColor={suitColor}
           cardShadow={cardShadow}
+          draggingIndex={drag?.idx ?? null}
+          onDragStart={startDrag}
+          onDragMove={moveDrag}
+          onDragEnd={endDrag}
         />
 
-        {/* Главная кнопка — низ по центру */}
-        <div
-          className="absolute left-0 right-0 grid place-items-center"
-          style={{ bottom: "calc(24px + env(safe-area-inset-bottom))" }}
-        >
+        {/* Кнопка */}
+        <div className="absolute left-0 right-0 grid place-items-center" style={{ bottom: "calc(24px + env(safe-area-inset-bottom))" }}>
           <button
             disabled={!mainBtn.enabled}
-            onClick={() => {
-              if (mainBtn.kind === "take") onTake();
-              if (mainBtn.kind === "bito") onBito();
-            }}
+            onClick={() => { if (mainBtn.kind === "take") onTake(); if (mainBtn.kind === "bito") onBito(); }}
             className="h-12 px-6 rounded-2xl border text-white backdrop-blur-md disabled:opacity-60"
             style={{
               minWidth: 220,
@@ -194,80 +232,99 @@ export default function DurakSkin({
           </button>
         </div>
       </div>
+
+      {/* Оверлей перетаскиваемой карты */}
+      {drag && (
+        <div className="pointer-events-none fixed inset-0 z-[999]">
+          <div
+            className="absolute"
+            style={{
+              left: drag.x - 40,  // центрируем примерно под палец/курсор
+              top: drag.y - 56,
+              transform: "rotate(0deg) scale(1.12)",
+              transition: "transform 60ms linear",
+            }}
+          >
+            <CardView c={drag.card} suitColor={suitColor} cardShadow={cardShadow} alpha={0.95} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-/* =================== Hand (веер + увеличение на фокусе) =================== */
+/* =================== Hand (веер + hover/drag) =================== */
 
 function HandFan({
   hand,
   onCardClick,
   suitColor,
   cardShadow,
+  draggingIndex,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
 }: {
   hand: Card[];
   onCardClick: (c: Card) => void;
   suitColor: (s: Suit) => string;
   cardShadow: string;
+  draggingIndex: number | null;
+  onDragStart: (idx: number, card: Card, x: number, y: number) => void;
+  onDragMove: (x: number, y: number) => void;
+  onDragEnd: (x: number, y: number) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [focusIdx, setFocusIdx] = useState<number | null>(null);
 
-  // Геометрия: ряд (<=4) или веер (>=5)
   const geom = useMemo(() => {
     const n = Math.max(1, hand.length);
-    const flat = n <= 4; // было 5 — теперь 4
-
+    const flat = n <= 5;
     if (flat) {
-      const gap = 92; // немногим шире, чтобы 4 карты красиво влезали
+      const gap = 92;
       const start = -((n - 1) / 2) * gap;
-      return hand.map((_, i) => ({
-        baseRot: 0,
-        baseX: start + i * gap,
-        baseY: 0,
-      }));
+      return hand.map((_, i) => ({ baseRot: 0, baseX: start + i * gap, baseY: 0 }));
     }
-
-    const spreadDeg = Math.min(70, 10 + 3 * hand.length);
+    const spreadDeg = Math.min(92, 18 + 4 * n);
     const startDeg = -spreadDeg / 2;
-    const stepDeg = hand.length > 1 ? spreadDeg / (hand.length - 1) : 0;
-    const stepX = Math.max(26, 36 - Math.max(0, hand.length - 8) * 2);
-    return hand.map((_, i) => ({
-      baseRot: startDeg + i * stepDeg,
-      baseX: (i - (hand.length - 1) / 2) * stepX,
-      baseY: Math.abs(startDeg + i * stepDeg) * 0.8,
-    }));
+    const stepDeg = n > 1 ? spreadDeg / (n - 1) : 0;
+    const baseStepX = 44;
+    const stepX = Math.max(30, baseStepX - Math.max(0, n - 8) * 2);
+    return hand.map((_, i) => {
+      const rot = startDeg + i * stepDeg;
+      return { baseRot: rot, baseX: (i - (n - 1) / 2) * stepX, baseY: Math.abs(rot) * 0.8 };
+    });
   }, [hand]);
 
   function indexFromClientX(clientX: number) {
-    const el = wrapRef.current;
-    if (!el) return null;
+    const el = wrapRef.current; if (!el) return null;
     const r = el.getBoundingClientRect();
     const x = Math.max(0, Math.min(r.width, clientX - r.left));
     if (hand.length <= 1) return 0;
-    return Math.max(
-      0,
-      Math.min(hand.length - 1, Math.round(((hand.length - 1) * x) / r.width))
-    );
+    return Math.max(0, Math.min(hand.length - 1, Math.round(((hand.length - 1) * x) / r.width)));
   }
-
   const onMove = (clientX: number) => setFocusIdx(indexFromClientX(clientX));
 
+  // pointer events для drag
+  const pointerMove = (e: PointerEvent) => onDragMove(e.clientX, e.clientY);
+  const pointerUp = (e: PointerEvent) => {
+    onDragEnd(e.clientX, e.clientY);
+    window.removeEventListener("pointermove", pointerMove);
+    window.removeEventListener("pointerup", pointerUp, true);
+  };
+
+  const handlePointerDown = (i: number, c: Card) => (e: React.PointerEvent) => {
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    onDragStart(i, c, e.clientX, e.clientY);
+    window.addEventListener("pointermove", pointerMove);
+    window.addEventListener("pointerup", pointerUp, true);
+  };
+
   return (
-    <div
-      className="pointer-events-none"
-      style={{
-        position: "absolute",
-        left: 0,
-        right: 0,
-        bottom: "calc(92px + env(safe-area-inset-bottom) + 56px)", // немного выше
-        height: 200,
-      }}
-    >
+    <div className="pointer-events-none" style={{ position: "absolute", left: 0, right: 0, bottom: "calc(84px + env(safe-area-inset-bottom) + 56px)", height: 200 }}>
       <div
         ref={wrapRef}
-        className="relative mx-auto w-full max-w-[92%] h-full"
+        className="relative mx-auto w-full max-w-[96%] h-full"
         onMouseMove={(e) => onMove(e.clientX)}
         onMouseLeave={() => setFocusIdx(null)}
         onTouchStart={(e) => onMove(e.touches[0].clientX)}
@@ -276,24 +333,10 @@ function HandFan({
       >
         {hand.map((c, i) => {
           const g = geom[i];
-          const d = focusIdx == null ? 99 : Math.abs(i - focusIdx);
-          const scale =
-            focusIdx == null
-              ? 1
-              : d === 0
-              ? 1.14
-              : d === 1
-              ? 1.07
-              : d === 2
-              ? 1.03
-              : 1;
-          const lift =
-            focusIdx == null ? 0 : d === 0 ? 18 : d === 1 ? 10 : d === 2 ? 6 : 0;
-          const spread =
-            focusIdx == null
-              ? 0
-              : (i - (focusIdx as number)) *
-                (d === 0 ? 0 : d === 1 ? 12 : d === 2 ? 6 : 0);
+          const d = focusIdx == null ? 99 : Math.abs(i - (focusIdx as number));
+          const scale = focusIdx == null ? 1 : d === 0 ? 1.14 : d === 1 ? 1.07 : d === 2 ? 1.03 : 1;
+          const lift = focusIdx == null ? 0 : d === 0 ? 18 : d === 1 ? 10 : d === 2 ? 6 : 0;
+          const spread = focusIdx == null ? 0 : (i - (focusIdx as number)) * (d === 0 ? 0 : d === 1 ? 12 : d === 2 ? 6 : 0);
           const z = 10 + (focusIdx == null ? i : 100 - d * 10);
 
           return (
@@ -302,16 +345,15 @@ function HandFan({
               className="absolute left-1/2 pointer-events-auto"
               style={{
                 bottom: 0,
-                transform: `translateX(-50%) translateX(${g.baseX + spread}px) translateY(${
-                  g.baseY - lift
-                }px) rotate(${g.baseRot}deg) scale(${scale})`,
-                transition:
-                  "transform 140ms ease, box-shadow 140ms ease, filter 140ms ease",
+                transform: `translateX(-50%) translateX(${g.baseX + spread}px) translateY(${g.baseY - lift}px) rotate(${g.baseRot}deg) scale(${scale})`,
+                transition: "transform 140ms ease, box-shadow 140ms ease, filter 140ms ease, opacity 140ms ease",
                 zIndex: z,
+                opacity: draggingIndex === i ? 0 : 1, // прячем оригинал во время драга
               }}
-              onClick={() => onCardClick(c)}
+              onPointerDown={handlePointerDown(i, c)}
+              onClick={() => onCardClick(c)} // запасной тап
             >
-              <CardView c={c} suitColor={suitColor} cardShadow={cardShadow} />
+              <CardView c={c} suitColor={suitColor} cardShadow={cardShadow} alpha={0.9} />
             </button>
           );
         })}
@@ -326,51 +368,35 @@ function CardView({
   c,
   suitColor,
   cardShadow,
+  alpha = 1,
 }: {
   c: Card;
   suitColor: (s: Suit) => string;
   cardShadow: string;
+  alpha?: number;
 }) {
   const red = c.suit === "♥" || c.suit === "♦";
-
   return (
     <div
       className="w-[72px] h-[104px] sm:w-[80px] sm:h-[116px] rounded-2xl grid"
       style={{
         gridTemplateRows: "1fr auto 1fr",
-        background: "linear-gradient(180deg, #ffffff, #f4f6fa)",
+        background: "linear-gradient(180deg, rgba(255,255,255,.96), rgba(244,246,250,.92))",
         border: "1px solid rgba(0,0,0,.06)",
         boxShadow: cardShadow,
         willChange: "transform",
+        opacity: alpha,
       }}
     >
-      {/* верхний угол — масть */}
-      <div
-        className="p-2 text-xs font-semibold"
-        style={{ color: suitColor(c.suit) }}
-      >
+      <div className="p-2 text-xs font-semibold" style={{ color: suitColor(c.suit) }}>
         {c.suit}
       </div>
-
-      {/* центр — крупный номинал */}
       <div className="grid place-items-center">
-        <div
-          className="font-extrabold tracking-wider"
-          style={{
-            fontSize: 28,
-            color: red ? "#ff5d72" : "#38d39f",
-            textShadow: "0 1px 0 rgba(0,0,0,.15)",
-          }}
-        >
+        <div className="font-extrabold tracking-wider" style={{ fontSize: 28, color: red ? "#ff5d72" : "#38d39f", textShadow: "0 1px 0 rgba(0,0,0,.15)" }}>
           {c.rank}
         </div>
       </div>
-
-      {/* нижний угол — масть */}
-      <div
-        className="p-2 text-xs font-semibold justify-self-end self-end"
-        style={{ color: suitColor(c.suit) }}
-      >
+      <div className="p-2 text-xs font-semibold justify-self-end self-end" style={{ color: suitColor(c.suit) }}>
         {c.suit}
       </div>
     </div>
@@ -389,20 +415,14 @@ function TableView({
   if (!table || table.length === 0) {
     return (
       <div className="w-full h-full grid place-items-center">
-        <div
-          className="px-4 py-3 rounded-2xl text-white/80 text-sm"
-          style={{
-            background: "rgba(255,255,255,.06)",
-            border: "1px solid rgba(255,255,255,.12)",
-          }}
-        >
+        <div className="px-4 py-3 rounded-2xl text-white/80 text-sm" style={{ background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.12)" }}>
           Стол пуст — ждём карту.
         </div>
       </div>
     );
   }
 
-  // пары — в 2 ряда по центру
+  // пары в 2 ряда по центру; каждому "атакующему" даём data-атрибут для попадания дропа
   return (
     <div className="w-full h-full grid place-items-center">
       <div className="relative w-[92%] max-w-[520px] min-h-[160px]">
@@ -410,15 +430,13 @@ function TableView({
           const x = (i % 3) * 120 - 120;
           const y = Math.floor(i / 3) * 130;
           return (
-            <div
-              key={i}
-              className="absolute left-1/2"
-              style={{ transform: `translateX(-50%) translate(${x}px, ${y}px)` }}
-            >
-              <CardView c={p.a} suitColor={suitColor} cardShadow={cardShadow} />
+            <div key={i} className="absolute left-1/2" style={{ transform: `translateX(-50%) translate(${x}px, ${y}px)` }}>
+              <div data-attack-slot="1" data-idx={i}>
+                <CardView c={p.a} suitColor={suitColor} cardShadow={cardShadow} alpha={1} />
+              </div>
               {p.d && (
                 <div className="absolute left-[54px] top-[18px] rotate-12">
-                  <CardView c={p.d} suitColor={suitColor} cardShadow={cardShadow} />
+                  <CardView c={p.d} suitColor={suitColor} cardShadow={cardShadow} alpha={1} />
                 </div>
               )}
             </div>
