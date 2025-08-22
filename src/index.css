@@ -2,16 +2,48 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ===== Base resets ===== */
 :root {
   color-scheme: dark;
+  --felt-dark: #1B4D73;
+  --felt-mid:  #225E8C;
+  --felt-light:#2C78B2;
+  /* ширина карты (для мест, где используется var(--card-w)) */
+  --card-w: clamp(44px, 8.2vw, 76px);
 }
-
-html, body, #root {
-  height: 100%;
-}
-
+*,*::before,*::after { box-sizing: border-box; }
+html, body, #root { height: 100%; }
 body {
-  margin: 0;
-  background: #0a0f14;
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+  margin: 0; background: #0a0f14;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
+img, svg, video, canvas { display: block; max-width: 100%; }
+button { -webkit-tap-highlight-color: transparent; }
+
+/* ===== Felt & cards ===== */
+.bg-felt{
+  background:
+    radial-gradient(1200px 800px at 50% -20%, rgba(255,255,255,0.08), transparent 60%),
+    radial-gradient(800px 600px at -10% 110%, rgba(255,255,255,0.06), transparent 60%),
+    linear-gradient(180deg, var(--felt-light), var(--felt-mid) 60%, var(--felt-dark));
+}
+.bg-card-back{
+  background-color:#3AB07A;
+  background-image: repeating-linear-gradient(45deg, rgba(255,255,255,0.25) 0 2px, transparent 2px 6px);
+}
+/* универсальный класс карты (если нужно через CSS var) */
+.card{ width: var(--card-w); aspect-ratio: 64 / 89; border-radius: 16px; }
+
+@supports (backdrop-filter: blur(4px)){ .backdrop-blur{ backdrop-filter: blur(8px); } }
+:root{ --safe-bottom: env(safe-area-inset-bottom); }
+.pb-safe{ padding-bottom: calc(16px + var(--safe-bottom)); }
+
+/* Адаптив (если экран низкий/узкий) */
+@media (max-height: 640px) { :root { --card-w: clamp(40px, 8vw, 68px); } }
+@media (max-width: 360px)  { :root { --card-w: clamp(40px, 9vw, 64px); } }
+
+/* скрыть горизонтальный скролл у руки (если используем overflow-x) */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

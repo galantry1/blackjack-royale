@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Crown, User2, Gamepad2, Users2, Info } from "lucide-react";
 
-// ==== API (наш бэкенд) ====
+// ==== API ====
 import {
   initUser,
   getBalance as apiGetBalance,
@@ -15,6 +15,7 @@ import {
 } from "./lib/api";
 
 import { socket } from "./lib/socket";
+import DurakScreen from "./screens/Durak";
 
 /* =================== Cards / Blackjack =================== */
 const SUITS = ["♠", "♥", "♦", "♣"] as const;
@@ -51,7 +52,7 @@ function handValue(cards: { rank: string; suit: string }[]) {
 }
 
 /* =================== Types / UI utils =================== */
-type Screen = "menu" | "bet" | "game" | "leaderboard" | "profile" | "partners";
+type Screen = "menu" | "bet" | "game" | "leaderboard" | "profile" | "partners" | "durak";
 type Turn = "player" | "dealer" | "end";
 type Result = "win" | "lose" | "push" | null;
 
@@ -69,8 +70,6 @@ const bg = "bg-[#0a0f14]";
 const BLUE = "#2176ff";
 
 /* =================== helpers (id, round, payout) =================== */
-
-// берём id из Telegram, иначе постоянный guest_<uuid> в localStorage
 function uid(): string {
   const tgId = (window as any)?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
   if (tgId) return `tg_${tgId}`;
@@ -83,18 +82,15 @@ function uid(): string {
   }
   return g;
 }
-
 const newRoundId = () =>
   (globalThis as any)?.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
 
-// твои правила выплат
 const PAYOUT = {
-  win: (stake: number) => Math.floor(stake * 1.9), // комиссия 10%
-  push: (stake: number) => stake, // возврат ставки
+  win: (stake: number) => Math.floor(stake * 1.9),
+  push: (stake: number) => stake,
 };
 
 /* =================== Малые UI-атомы =================== */
-
 const Button: React.FC<
   React.ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean; size?: "lg" | "md" | "sm" }
 > = ({ className, active, size = "md", ...props }) => (
@@ -175,14 +171,10 @@ const ShuffleDeck = () => (
   </>
 );
 
-/* ============ Live Ticker (полоса пополнений) ============ */
+/* ============ Live Ticker ============ */
 const LiveTicker: React.FC = () => {
   const [items, setItems] = useState<{ id: string; amount: number }[]>(
-    () =>
-      Array.from({ length: 16 }, (_, i) => ({
-        id: `init_${i}`,
-        amount: [40, 80, 120, 200, 60, 90, 150, 240][i % 8],
-      }))
+    () => Array.from({ length: 16 }, (_, i) => ({ id: `init_${i}`, amount: [40, 80, 120, 200, 60, 90, 150, 240][i % 8] }))
   );
 
   useEffect(() => {
@@ -228,10 +220,8 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("menu");
   const [userId, setUserId] = useState<string>("");
 
-  // баланс только с бэка
   const [balance, setBalance] = useState<number>(0);
 
-  // локальная история только для UI
   const [history, setHistory] = useState<UIHistoryItem[]>(() => {
     try {
       const raw = localStorage.getItem("history_v1");
@@ -244,7 +234,7 @@ export default function App() {
 
   const [bet, setBet] = useState(25);
 
-  // game state (локальная колода — используется в solo; в PvP управляется сервером)
+  // SOLO blackjack state
   const [deck, setDeck] = useState(createDeck());
   const [player, setPlayer] = useState<Card[]>([]);
   const [dealer, setDealer] = useState<Card[]>([]);
@@ -252,7 +242,6 @@ export default function App() {
   const [revealed, setRevealed] = useState(false);
   const [roundResult, setRoundResult] = useState<Result>(null);
 
-  // текущий roundId и stake на сервере (solo использует roundId для /win)
   const [roundId, setRoundId] = useState<string | null>(null);
   const [stakeOnServer, setStakeOnServer] = useState<number>(0);
 
@@ -262,9 +251,9 @@ export default function App() {
   const [pvpMode, setPvpMode] = useState(false);
   const [youStood, setYouStood] = useState(false);
   const [oppStood, setOppStood] = useState(false);
+  const [oppScore, setOppScore] = useState<number | null>(null);
   const [deadlineMs, setDeadlineMs] = useState<number | null>(null);
   const [pvpSecondsLeft, setPvpSecondsLeft] = useState<number | null>(null);
-  const [pvpRevealAll, setPvpRevealAll] = useState(false); // <<< раскрывать ли все карты оппонента (в конце)
 
   // leaderboard
   const [leaders, setLeaders] = useState<LeaderboardRow[] | null>(null);
@@ -273,51 +262,36 @@ export default function App() {
   // partners
   const [refLink, setRefLink] = useState<string>("");
 
-  // bet countdown (экран ставки)
+  // bet countdown
   const BET_SECONDS = 10;
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
   const pVal = useMemo(() => handValue(player), [player]);
   const dVal = useMemo(() => handValue(dealer), [dealer]);
 
-  // публичный счёт оппонента = сумма первых двух карт
-  const oppPublicScore = useMemo(() => {
-    if (!pvpMode) return null;
-    return handValue(dealer.slice(0, 2));
-  }, [pvpMode, dealer]);
-
-  /* ======== Persistence (save history only) ======== */
   useEffect(() => {
-    try {
-      localStorage.setItem("history_v1", JSON.stringify(history));
-    } catch {}
+    try { localStorage.setItem("history_v1", JSON.stringify(history)); } catch {}
   }, [history]);
 
-  /* ======== Init from backend ======== */
   useEffect(() => {
     const id = uid();
     setUserId(id);
     (async () => {
       try {
-        await initUser(id); // стартовый баланс для гостя/нового юзера
+        await initUser(id);
         const b = await apiGetBalance(id);
         setBalance(b.balance);
-        // >>> привет сокету
         socket.emit("hello", { userId: id });
       } catch (e) {
         console.error(e);
       }
     })();
 
-    // если пришли по реф-ссылке ?ref=CODE — привязываем (без жёстких ошибок)
     const url = new URL(window.location.href);
     const ref = url.searchParams.get("ref");
     if (ref) applyRef(id, ref).catch(() => {});
 
-    // лидерборд
     loadLeaderboard("wins").catch(() => {});
-
-    // партнёрская ссылка
     getRefLink(id)
       .then((r) => setRefLink(r.web || r.telegram))
       .catch(() => {});
@@ -325,68 +299,72 @@ export default function App() {
   }, []);
 
   async function refreshBalance() {
-    try {
-      const b = await apiGetBalance(userId);
-      setBalance(b.balance);
-    } catch (e) {
-      console.error(e);
-    }
+    try { const b = await apiGetBalance(userId); setBalance(b.balance); } catch {}
   }
-
   async function loadLeaderboard(metric: "wins" | "profit" = lbMetric) {
-    try {
-      const d = await getLeaderboard(metric, 20);
-      setLeaders(d.entries);
-    } catch (e) {
-      console.error(e);
-      setLeaders([]);
-    }
+    try { const d = await getLeaderboard(metric, 20); setLeaders(d.entries); }
+    catch { setLeaders([]); }
   }
 
-  /* ======== PvP подписки ======== */
+  /* ======== PvP типы и подписки ======== */
+
+  type PvPHandState = { hand: Card[]; score: number; stood?: boolean };
+  type MatchFoundPayload = { roomId: string };
+  type StatePayload = {
+    roomId: string;
+    you: PvPHandState;
+    opp: PvPHandState;
+    deadline?: number;
+    stake?: number;
+  };
+  type ResultPayload = {
+    roomId: string;
+    you: number;   // итоговая сумма очков игрока (для истории)
+    opp: number;   // итоговая сумма очков оппонента
+    result: Exclude<Result, null>;
+  };
+
   useEffect(() => {
-    function onMatchFound({ roomId }: any) {
+    function onMatchFound({ roomId }: MatchFoundPayload) {
       setIsQueueing(false);
       setCurrentRoom(roomId);
       setPvpMode(true);
-      setPvpRevealAll(false);
       socket.emit("ready", { roomId });
       setScreen("game");
     }
-    function onState({ roomId, you, opp, deadline, stake }: any) {
+    function onState({ roomId, you, opp, deadline, stake }: StatePayload) {
       if (currentRoom && roomId !== currentRoom) return;
       setStakeOnServer(stake ?? stakeOnServer);
       setPlayer(you.hand);
       setDealer(opp.hand);
+      setOppScore(opp.score);
       setYouStood(!!you.stood);
       setOppStood(!!opp.stood);
-      setRevealed(true); // solo-логика не влияет на pvp
-      setTurn(you.stood ? (opp.stood ? "end" : "dealer") : "player");
+
+      // раскрываем карты оппонента только после того, как оба закончили
+      const reveal = !!you.stood && !!opp.stood;
+      setRevealed(reveal);
+
+      setTurn(reveal ? "end" : you.stood ? "dealer" : "player");
       setDeadlineMs(deadline || null);
-      setPvpRevealAll(false); // до конца раунда скрываем добор оппонента
     }
-    function onResult({ roomId, you, opp, result }: any) {
+    function onResult({ roomId, you, opp, result }: ResultPayload) {
       if (currentRoom && roomId !== currentRoom) return;
 
-      // раскрыть все карты и показать итоговые суммы
-      setPvpRevealAll(true);
       setRoundResult(result);
       setTurn("end");
       setYouStood(true);
       setOppStood(true);
       setPvpSecondsLeft(0);
-
-      // история (подстрахуемся: если сервер не прислал числа — возьмём локально)
-      const youScore = typeof you === "number" ? you : pVal;
-      const oppScore = typeof opp === "number" ? opp : dVal;
+      setRevealed(true);
 
       const item: UIHistoryItem = {
         id: newRoundId(),
         when: new Date().toLocaleString(),
         bet: stakeOnServer,
         result,
-        you: youScore,
-        opp: oppScore,
+        you,
+        opp,
       };
       setHistory((h) => [item, ...h].slice(0, 50));
 
@@ -404,18 +382,11 @@ export default function App() {
       socket.off("result", onResult);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentRoom, stakeOnServer, pVal, dVal]);
+  }, [currentRoom, stakeOnServer]);
 
-  // PvP таймер по дедлайну комнаты
   useEffect(() => {
-    if (!pvpMode || !deadlineMs) {
-      setPvpSecondsLeft(null);
-      return;
-    }
-    const tick = () => {
-      const left = Math.max(0, Math.ceil((deadlineMs - Date.now()) / 1000));
-      setPvpSecondsLeft(left);
-    };
+    if (!pvpMode || !deadlineMs) { setPvpSecondsLeft(null); return; }
+    const tick = () => { setPvpSecondsLeft(Math.max(0, Math.ceil((deadlineMs - Date.now()) / 1000))); };
     tick();
     const t = setInterval(tick, 300);
     return () => clearInterval(t);
@@ -423,172 +394,92 @@ export default function App() {
 
   /* ======== Helpers ======== */
   function resetGameState() {
-    setPlayer([]);
-    setDealer([]);
-    setDeck(createDeck());
-    setTurn("player");
-    setRevealed(false);
-    setRoundResult(null);
-    setStakeOnServer(0);
-    setRoundId(null);
+    setPlayer([]); setDealer([]); setDeck(createDeck());
+    setTurn("player"); setRevealed(false); setRoundResult(null);
+    setStakeOnServer(0); setRoundId(null);
 
-    // PvP сброс
-    setCurrentRoom(null);
-    setPvpMode(false);
-    setIsQueueing(false);
-    setYouStood(false);
-    setOppStood(false);
-    setDeadlineMs(null);
-    setPvpSecondsLeft(null);
-    setPvpRevealAll(false);
+    setCurrentRoom(null); setPvpMode(false); setIsQueueing(false);
+    setOppScore(null); setYouStood(false); setOppStood(false); setDeadlineMs(null); setPvpSecondsLeft(null);
   }
-  function goMenu() {
-    resetGameState();
-    setScreen("menu");
-    setSecondsLeft(null);
-  }
+  function goMenu() { resetGameState(); setScreen("menu"); setSecondsLeft(null); }
   function startRoundFromDeck(useExistingDeck: boolean) {
     const d = useExistingDeck ? [...deck] : createDeck();
     const p = [d.pop()!, d.pop()!];
     const o = [d.pop()!, d.pop()!];
-    setDeck(d);
-    setPlayer(p);
-    setDealer(o);
-    setTurn("player");
-    setRevealed(false);
-    setRoundResult(null);
+    setDeck(d); setPlayer(p); setDealer(o);
+    setTurn("player"); setRevealed(false); setRoundResult(null);
   }
 
   /* ======== Bet flow ======== */
-  function openBetStage() {
-    setSecondsLeft(BET_SECONDS);
-    setScreen("bet");
-  }
-  // countdown для экрана ставок
+  function openBetStage() { setSecondsLeft(BET_SECONDS); setScreen("bet"); }
   useEffect(() => {
     if (screen !== "bet" || secondsLeft == null) return;
-    if (secondsLeft <= 0) {
-      // если не успел выбрать — просто выходим в меню (считай автокэнсел)
-      goMenu();
-      return;
-    }
+    if (secondsLeft <= 0) { goMenu(); return; }
     const t = setTimeout(() => setSecondsLeft((s) => (s == null ? null : s - 1)), 1000);
     return () => clearTimeout(t);
   }, [screen, secondsLeft]);
 
   async function confirmBetAndStart() {
-    if (bet > balance) {
-      alert("Недостаточно средств для ставки");
-      return;
-    }
+    if (bet > balance) { alert("Недостаточно средств для ставки"); return; }
     const rId = newRoundId();
     try {
-      // списание на сервере
       const res = await apiBet(userId, bet, rId);
-      if (!res.success) {
-        alert(res.message || "Не удалось сделать ставку");
-        return;
-      }
+      if (!res.success) { alert(res.message || "Не удалось сделать ставку"); return; }
       setBalance(res.balance);
       setRoundId(rId);
       setStakeOnServer(bet);
 
-      // ВСТАЁМ в очередь по этой ставке и ждём match-found/state
       setIsQueueing(true);
-      setPvpMode(true); // готовимся к PvP
-      setPvpRevealAll(false);
+      setPvpMode(true);
       socket.emit("queue", { stake: bet });
-      setScreen("menu"); // экран ожидания
+      setScreen("menu");
       setSecondsLeft(null);
-    } catch (e: any) {
-      alert(e?.message || "Ошибка /bet");
-    }
+    } catch (e: any) { alert(e?.message || "Ошибка /bet"); }
   }
 
   /* ======== Menu actions ======== */
-  function onPlay() {
-    openBetStage();
-  }
+  function onPlay() { openBetStage(); }
   function makeLobby() {
     const lobbyCode = Math.random().toString(36).slice(2, 8);
     const url = `${window.location.origin}/?lobby=${lobbyCode}`;
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(url);
-      alert(`Ссылка лобби скопирована!\n${url}`);
-    } else {
-      prompt("Скопируй ссылку:", url);
-    }
+    if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(url); alert(`Ссылка лобби скопирована!\n${url}`); }
+    else { prompt("Скопируй ссылку:", url); }
   }
-  function onPlayWithFriend() {
-    makeLobby();
-  }
+  function onPlayWithFriend() { makeLobby(); }
 
   /* ======== Game controls ======== */
-  function backFromGame() {
-    goMenu();
-  }
+  function backFromGame() { goMenu(); }
   function hit() {
-    // PvP: ходы на сервер
-    if (pvpMode && currentRoom) {
-      if (!youStood) socket.emit("move", { roomId: currentRoom, action: "hit" });
-      return;
-    }
-
-    // SOLO (vs бот)
+    if (pvpMode && currentRoom) { if (!youStood) socket.emit("move", { roomId: currentRoom, action: "hit" }); return; }
     if (turn !== "player") return;
-    const d = [...deck];
-    const c = d.pop();
-    if (!c) return;
-    const next = [...player, c];
-    setDeck(d);
-    setPlayer(next);
-
-    if (handValue(next) > 21) {
-      setTurn("dealer");
-    }
+    const d = [...deck], c = d.pop(); if (!c) return;
+    const next = [...player, c]; setDeck(d); setPlayer(next);
+    if (handValue(next) > 21) { setTurn("dealer"); }
   }
   function stand() {
-    // PvP: серверу
-    if (pvpMode && currentRoom) {
-      if (!youStood) socket.emit("move", { roomId: currentRoom, action: "stand" });
-      return;
-    }
-
-    // SOLO
-    if (turn !== "player") return;
-    setTurn("dealer");
+    if (pvpMode && currentRoom) { if (!youStood) socket.emit("move", { roomId: currentRoom, action: "stand" }); return; }
+    if (turn !== "player") return; setTurn("dealer");
   }
 
-  // dealer auto play (SOLO) — в PvP сервер всё делает сам
   useEffect(() => {
     if (pvpMode) return;
     if (turn !== "dealer") return;
     const t = setTimeout(() => {
       setRevealed(true);
-      let d = [...dealer];
-      let dd = [...deck];
-      while (handValue(d) < 17) {
-        const c = dd.pop();
-        if (!c) break;
-        d.push(c);
-      }
-      setDealer(d);
-      setDeck(dd);
-      setTurn("end");
+      let d = [...dealer], dd = [...deck];
+      while (handValue(d) < 17) { const c = dd.pop(); if (!c) break; d.push(c); }
+      setDealer(d); setDeck(dd); setTurn("end");
     }, 500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn, pvpMode]);
 
-  // end of round SOLO -> начисления на сервере + локальная история
   useEffect(() => {
-    if (pvpMode) return; // в PvP результат приходит событием "result"
+    if (pvpMode) return;
     if (turn !== "end" || !roundId) return;
 
     (async () => {
-      const p = pVal;
-      const o = dVal;
-
+      const p = pVal, o = dVal;
       let res: Exclude<Result, null> = "push";
       if (p > 21 && o > 21) res = "push";
       else if (p > 21) res = "lose";
@@ -604,37 +495,19 @@ export default function App() {
           const r = await apiWin(userId, PAYOUT.push(stakeOnServer), roundId);
           if (r.success) setBalance(r.balance);
         }
-      } catch (e) {
-        console.error("settle error:", e);
-      }
+      } catch {}
 
-      // локальная UI-история
       const id = newRoundId();
-      const item: UIHistoryItem = {
-        id,
-        when: new Date().toLocaleString(),
-        bet: stakeOnServer,
-        result: res,
-        you: p,
-        opp: o,
-      };
+      const item: UIHistoryItem = { id, when: new Date().toLocaleString(), bet: stakeOnServer, result: res, you: p, opp: o };
       setHistory((h) => [item, ...h].slice(0, 50));
 
-      setRoundResult(res);
-      setRoundId(null);
-      setStakeOnServer(0);
-
-      // обновим баланс и лидерборд
-      refreshBalance();
-      loadLeaderboard().catch(() => {});
+      setRoundResult(res); setRoundId(null); setStakeOnServer(0);
+      refreshBalance(); loadLeaderboard().catch(() => {});
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn, pvpMode]);
 
-  function nextRound() {
-    // единый вход — снова экран ставок
-    openBetStage();
-  }
+  function nextRound() { openBetStage(); }
 
   /* =================== Screens =================== */
 
@@ -643,7 +516,6 @@ export default function App() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-white tracking-wide">21 • 1 на 1</h1>
-          <p className="text-white/60 text-sm mt-1">Минимализм • чёрный + синий</p>
         </div>
         <Pill>Баланс: {balance}</Pill>
       </div>
@@ -669,13 +541,12 @@ export default function App() {
             Играть с другом
           </div>
         </Button>
-      </div>
-
-      <div className="mt-6 p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
-        <h3 className="text-white/90 font-semibold">Правила (кратко)</h3>
-        <p className="text-white/60 text-sm mt-2 leading-relaxed">
-          Цель — сумма ближе к 21, не перебрав. Туз = 1 или 11. В PvP оба играют одновременно, у каждого 30 секунд на решение.
-        </p>
+        <Button size="lg" onClick={() => setScreen("durak")} className="w-full">
+          <div className="flex items-center justify-center gap-2">
+            <span className="font-semibold">🃏</span>
+            Дурак
+          </div>
+        </Button>
       </div>
 
       <ShuffleDeck />
@@ -688,9 +559,7 @@ export default function App() {
   const BetScreen = (
     <div className="p-4 space-y-6">
       <div className="flex items-center justify-between">
-        <Button onClick={goMenu} className="h-9 px-3">
-          Назад
-        </Button>
+        <Button onClick={goMenu} className="h-9 px-3">Назад</Button>
         <Pill>Баланс: {balance}</Pill>
       </div>
 
@@ -701,29 +570,18 @@ export default function App() {
             <svg width="40" height="40" viewBox="0 0 40 40">
               <circle cx="20" cy="20" r="17" stroke="rgba(255,255,255,.2)" strokeWidth="4" fill="none" />
               <circle
-                cx="20"
-                cy="20"
-                r="17"
-                stroke={BLUE}
-                strokeWidth="4"
-                fill="none"
-                strokeLinecap="round"
-                strokeDasharray={`${CIRC}`}
-                strokeDashoffset={`${CIRC * (1 - progress)}`}
+                cx="20" cy="20" r="17" stroke={BLUE} strokeWidth="4" fill="none" strokeLinecap="round"
+                strokeDasharray={`${CIRC}`} strokeDashoffset={`${CIRC * (1 - progress)}`}
                 style={{ transition: "stroke-dashoffset 300ms linear" }}
               />
             </svg>
-            <div className="absolute inset-0 grid place-items-center text-white text-xs">
-              {secondsLeft ?? ""}
-            </div>
+            <div className="absolute inset-0 grid place-items-center text-white text-xs">{secondsLeft ?? ""}</div>
           </div>
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {[10, 25, 50, 100, 250, 500].map((v) => (
-            <Button key={v} size="md" active={bet === v} onClick={() => setBet(v)} disabled={v > balance}>
-              {v}
-            </Button>
+            <Button key={v} size="md" active={bet === v} onClick={() => setBet(v)} disabled={v > balance}>{v}</Button>
           ))}
         </div>
         <Button size="lg" className="w-full mt-4" onClick={confirmBetAndStart} disabled={bet > balance}>
@@ -737,9 +595,7 @@ export default function App() {
   const GameScreen = (
     <div className="p-4">
       <div className="flex items-center justify-between mb-3">
-        <Button onClick={backFromGame} className="h-9 px-3">
-          Назад
-        </Button>
+        <Button onClick={backFromGame} className="h-9 px-3">Назад</Button>
         <Pill>Баланс: {balance}</Pill>
       </div>
 
@@ -747,22 +603,20 @@ export default function App() {
       <div className="mt-2">
         <div className="flex items-center justify-between">
           <span className="text-white/70 text-sm">Оппонент</span>
-          <span className="text-white/70 text-sm">
-            {pvpMode ? (pvpRevealAll ? dVal : oppPublicScore ?? "?") : revealed || turn !== "dealer" ? dVal : "?"}
-          </span>
+          <span className="text-white/70 text-sm">{pvpMode ? (oppScore ?? "?") : (revealed || turn !== "dealer" ? dVal : "?")}</span>
         </div>
         <div className="flex gap-2 mt-2">
-          {dealer.map((c, i) => (
-            <CardView
-              key={i}
-              c={c}
-              hidden={
-                pvpMode
-                  ? !pvpRevealAll && i >= 2 // в PvP до конца раунда показываем только первые две карты
-                  : i === 0 && !revealed && turn !== "end" && turn !== "dealer" // solo: первая скрыта до хода дилера/конца
-              }
-            />
-          ))}
+          {!pvpMode ? (
+            dealer.map((c, i) => (
+              <CardView key={i} c={c} hidden={i === 0 && !revealed && turn !== "end" && turn !== "dealer"} />
+            ))
+          ) : (youStood && oppStood) ? (
+            dealer.map((c, i) => <CardView key={i} c={c} />)
+          ) : (
+            Array.from({ length: dealer.length }).map((_, i) => (
+              <CardView key={i} c={{ rank: "A", suit: "♠" } as Card} hidden />
+            ))
+          )}
         </div>
       </div>
 
@@ -773,9 +627,7 @@ export default function App() {
           <span className="text-white/90 font-medium">{pVal}</span>
         </div>
         <div className="flex gap-2 mt-2">
-          {player.map((c, i) => (
-            <CardView key={i} c={c} />
-          ))}
+          {player.map((c, i) => <CardView key={i} c={c} />)}
         </div>
       </div>
 
@@ -790,21 +642,13 @@ export default function App() {
       <div className="mt-8 grid grid-cols-2 gap-3">
         {turn === "player" || (pvpMode && !youStood && turn !== "end") ? (
           <>
-            <Button size="lg" onClick={hit} className="w-full" disabled={pvpMode && youStood}>
-              Взять
-            </Button>
-            <Button size="lg" onClick={stand} className="w-full" disabled={pvpMode && youStood}>
-              Стоп
-            </Button>
+            <Button size="lg" onClick={hit} className="w-full" disabled={pvpMode && youStood}>Взять</Button>
+            <Button size="lg" onClick={stand} className="w-full" disabled={pvpMode && youStood}>Стоп</Button>
           </>
         ) : turn === "end" || (pvpMode && youStood && oppStood) ? (
-          <Button size="lg" onClick={nextRound} className="col-span-2 w-full">
-            Следующий раунд
-          </Button>
+          <Button size="lg" onClick={nextRound} className="col-span-2 w-full">Следующий раунд</Button>
         ) : (
-          <Button disabled size="lg" className="col-span-2 w-full">
-            Ход оппонента…
-          </Button>
+          <Button disabled size="lg" className="col-span-2 w-full">Ход оппонента…</Button>
         )}
       </div>
 
@@ -839,49 +683,28 @@ export default function App() {
           <Crown size={18} /> Таблица лидеров
         </h2>
         <div className="flex gap-2">
-          <Button
-            size="sm"
-            active={lbMetric === "wins"}
-            onClick={() => {
-              setLbMetric("wins");
-              loadLeaderboard("wins");
-            }}
-          >
+          <Button size="sm" active={lbMetric === "wins"} onClick={() => { setLbMetric("wins"); loadLeaderboard("wins"); }}>
             ТОП по победам
           </Button>
-          <Button
-            size="sm"
-            active={lbMetric === "profit"}
-            onClick={() => {
-              setLbMetric("profit");
-              loadLeaderboard("profit");
-            }}
-          >
+          <Button size="sm" active={lbMetric === "profit"} onClick={() => { setLbMetric("profit"); loadLeaderboard("profit"); }}>
             По профиту
           </Button>
         </div>
       </div>
 
       {!leaders && <div className="text-white/60">Загрузка…</div>}
-      {leaders && leaders.length === 0 && (
-        <div className="text-white/60">Пока пусто — сыграй несколько раундов.</div>
-      )}
+      {leaders && leaders.length === 0 && <div className="text-white/60">Пока пусто — сыграй несколько раундов.</div>}
       {leaders && leaders.length > 0 && (
         <div className="space-y-2">
           {leaders.map((u) => (
-            <div
-              key={u.userId}
-              className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md"
-            >
+            <div key={u.userId} className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-xl border border-white/10 bg-gradient-to-br from-[#1e293b] to-[#0b1220] grid place-items-center text-white/80">
                   {(u.userId.match(/[a-z0-9]/i)?.[0] || "U").toUpperCase()}
                 </div>
                 <div className="text-white truncate max-w-[160px]">{u.userId}</div>
               </div>
-              <div className="text-white/80">
-                {lbMetric === "wins" ? `${u.wins} побед` : `${u.profit > 0 ? "+" : ""}${u.profit}`}
-              </div>
+              <div className="text-white/80">{lbMetric === "wins" ? `${u.wins} побед` : `${u.profit > 0 ? "+" : ""}${u.profit}`}</div>
             </div>
           ))}
         </div>
@@ -892,35 +715,19 @@ export default function App() {
   const ProfileScreen = (
     <div className="p-4 space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-          <User2 size={18} /> Профиль
-        </h2>
+        <h2 className="text-xl font-semibold text-white flex items-center gap-2"><User2 size={18} /> Профиль</h2>
         <Pill>Баланс: {balance}</Pill>
       </div>
 
-      {/* Тестовое пополнение (+1000) с фоллбэком */}
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
         <div className="text-white/90 font-medium mb-2">Тестовое пополнение</div>
         <div className="flex gap-2 flex-wrap">
-          <Button
-            onClick={async () => {
-              try {
-                const r = await topup(userId, 1000);
-                setBalance(r.balance);
-                alert("Баланс пополнен на +1000");
-                loadLeaderboard().catch(() => {});
-              } catch {
-                setBalance((b) => b + 1000);
-                alert("Бэкенд недоступен. Временное локальное +1000 для демонстрации.");
-              }
-            }}
-          >
-            +1000 (тест)
-          </Button>
+          <Button onClick={async () => {
+            try { const r = await topup(userId, 1000); setBalance(r.balance); alert("Баланс пополнен на +1000"); loadLeaderboard().catch(()=>{}); }
+            catch { setBalance((b) => b + 1000); alert("Бэкенд недоступен. Временное локальное +1000 для демонстрации."); }
+          }}>+1000 (тест)</Button>
         </div>
-        <div className="text-white/50 text-xs mt-2">
-          * Если сервер недоступен, прибавление только в интерфейсе (для быстрых тестов).
-        </div>
+        <div className="text-white/50 text-xs mt-2">* Если сервер недоступен, прибавление только в интерфейсе.</div>
       </div>
 
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
@@ -932,21 +739,11 @@ export default function App() {
             </div>
           )}
           {history.map((h) => (
-            <div
-              key={h.id}
-              className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-[#0f1723]"
-            >
+            <div key={h.id} className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-[#0f1723]">
               <div className="text-white/80 text-sm">{h.when}</div>
-              <div className="text-white text-sm">
-                {h.result === "win" ? "+" : h.result === "lose" ? "-" : "±"}
-                {h.bet}
-              </div>
+              <div className="text-white text-sm">{h.result === "win" ? "+" : h.result === "lose" ? "-" : "±"}{h.bet}</div>
               <div className="text-white/60 text-sm">
-                {Number.isFinite(h.you) && Number.isFinite(h.opp) ? (
-                  <>Ты {h.you} • Опп {h.opp}</>
-                ) : (
-                  <>Результат: {h.result}</>
-                )}
+                {Number.isFinite(h.you) && Number.isFinite(h.opp) ? (<>Ты {h.you} • Опп {h.opp}</>) : (<>Результат: {h.result}</>)}
               </div>
             </div>
           ))}
@@ -958,50 +755,23 @@ export default function App() {
   const PartnersScreen = (
     <div className="p-4 space-y-4">
       <h2 className="text-xl font-semibold text-white">Партнёры</h2>
-
       <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md space-y-3">
-        <div className="text-white/80 text-sm">
-          Делись ссылкой и получай <b>5%</b> от каждого пополнения друга.
-        </div>
-        <div className="text-white/70 text-xs break-all p-3 rounded-xl bg-[#0f1723] border border-white/10">
-          {refLink || "—"}
-        </div>
+        <div className="text-white/80 text-sm">Делись ссылкой и получай <b>5%</b> от каждого пополнения друга.</div>
+        <div className="text-white/70 text-xs break-all p-3 rounded-xl bg-[#0f1723] border border-white/10">{refLink || "—"}</div>
         <div className="flex gap-2">
-          <Button
-            onClick={() => {
-              if (refLink) navigator.clipboard.writeText(refLink);
-            }}
-          >
-            Скопировать
-          </Button>
-          <Button
-            onClick={async () => {
-              const r = prompt("Тест: пополнить на сумму (например 200)");
-              if (!r) return;
-              const n = Number(r);
-              if (!Number.isFinite(n) || n <= 0) return;
-              try {
-                const t = await topup(userId, n);
-                setBalance(t.balance);
-                alert(`Баланс пополнен на ${n}`);
-                loadLeaderboard().catch(() => {});
-              } catch {
-                setBalance((b) => b + n);
-                alert("Бэкенд недоступен. Временное локальное пополнение для демонстрации.");
-              }
-            }}
-          >
-            Тестовое пополнение
-          </Button>
+          <Button onClick={() => { if (refLink) navigator.clipboard.writeText(refLink); }}>Скопировать</Button>
+          <Button onClick={async () => {
+            const r = prompt("Тест: пополнить на сумму (например 200)"); if (!r) return;
+            const n = Number(r); if (!Number.isFinite(n) || n <= 0) return;
+            try { const t = await topup(userId, n); setBalance(t.balance); alert(`Баланс пополнен на ${n}`); loadLeaderboard().catch(()=>{}); }
+            catch { setBalance((b) => b + n); alert("Бэкенд недоступен. Временное локальное пополнение."); }
+          }}>Тестовое пополнение</Button>
         </div>
-        <div className="text-white/50 text-xs">
-          * Для продакшена подключим реальные платежи и автоначисление 5%.
-        </div>
+        <div className="text-white/50 text-xs">* Для продакшена подключим реальные платежи и автоначисление 5%.</div>
       </div>
     </div>
   );
 
-  /* =================== Root Layout =================== */
   return (
     <div
       className={cn("min-h-screen w-full", bg)}
@@ -1012,13 +782,7 @@ export default function App() {
     >
       <div className="max-w-md mx-auto h-[100dvh] flex flex-col">
         {/* Top Bar */}
-        <div
-          className={cn(
-            "px-4 pt-4 pb-3 sticky top-0 z-10 border-b border-white/10",
-            bg,
-            "bg-opacity-80 backdrop-blur-md"
-          )}
-        >
+        <div className={cn("px-4 pt-4 pb-3 sticky top-0 z-10 border-b border-white/10", bg, "bg-opacity-80 backdrop-blur-md")}>
           <div className="flex items-center justify-between">
             <div className="text-white/80 text-sm tracking-wide">21 · 1 на 1</div>
             <div className="text-white font-semibold">Баланс: {balance}</div>
@@ -1026,12 +790,7 @@ export default function App() {
         </div>
 
         {/* Content */}
-        <div
-          className={cn(
-            "flex-1 overflow-auto px-2",
-            screen === "game" || screen === "bet" ? "pb-8" : "pb-[calc(96px+env(safe-area-inset-bottom))]"
-          )}
-        >
+        <div className={cn("flex-1 overflow-auto px-2", screen === "game" || screen === "bet" ? "pb-8" : "pb-[calc(96px+env(safe-area-inset-bottom))]")}>
           <div className="mx-2">
             {screen === "menu" && MenuScreen}
             {screen === "bet" && BetScreen}
@@ -1039,44 +798,26 @@ export default function App() {
             {screen === "leaderboard" && LeaderboardScreen}
             {screen === "profile" && ProfileScreen}
             {screen === "partners" && PartnersScreen}
+            {screen === "durak" && (
+              <DurakScreen
+                userId={userId}
+                balance={balance}
+                setBalance={(n)=>setBalance(n)}
+                goBack={()=>setScreen("menu")}
+              />
+            )}
           </div>
         </div>
 
-        {/* Bottom Nav (4 вкладки) — скрыт на ставке и в игре */}
+        {/* Bottom Nav */}
         {screen !== "game" && screen !== "bet" && (
-          <nav
-            className={cn(
-              "fixed bottom-0 left-0 right-0 z-50 border-t border-white/10",
-              bg,
-              "bg-opacity-80 backdrop-blur-md"
-            )}
-            style={{ paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}
-          >
+          <nav className={cn("fixed bottom-0 left-0 right-0 z-50 border-t border-white/10", bg, "bg-opacity-80 backdrop-blur-md")}
+               style={{ paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
             <div className="max-w-md mx-auto grid grid-cols-4 gap-2 p-2">
-              <NavButton
-                label="Меню"
-                icon={<Gamepad2 size={18} />}
-                active={screen === "menu"}
-                onClick={() => setScreen("menu")}
-              />
-              <NavButton
-                label="Лидеры"
-                icon={<Crown size={18} />}
-                active={screen === "leaderboard"}
-                onClick={() => setScreen("leaderboard")}
-              />
-              <NavButton
-                label="Профиль"
-                icon={<User2 size={18} />}
-                active={screen === "profile"}
-                onClick={() => setScreen("profile")}
-              />
-              <NavButton
-                label="Партнёры"
-                icon={<span className="font-semibold">₽</span>}
-                active={screen === "partners"}
-                onClick={() => setScreen("partners")}
-              />
+              <NavButton label="Меню" icon={<Gamepad2 size={18} />} active={screen === "menu"} onClick={() => setScreen("menu")} />
+              <NavButton label="Лидеры" icon={<Crown size={18} />} active={screen === "leaderboard"} onClick={() => setScreen("leaderboard")} />
+              <NavButton label="Профиль" icon={<User2 size={18} />} active={screen === "profile"} onClick={() => setScreen("profile")} />
+              <NavButton label="Партнёры" icon={<span className="font-semibold">₽</span>} active={screen === "partners"} onClick={() => setScreen("partners")} />
             </div>
           </nav>
         )}
@@ -1087,16 +828,8 @@ export default function App() {
 
 /* =================== Nav Button =================== */
 function NavButton({
-  label,
-  icon,
-  active,
-  onClick,
-}: {
-  label: string;
-  icon: React.ReactNode;
-  active?: boolean;
-  onClick?: () => void;
-}) {
+  label, icon, active, onClick,
+}: { label: string; icon: React.ReactNode; active?: boolean; onClick?: () => void; }) {
   const cnx = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ");
   return (
     <button
