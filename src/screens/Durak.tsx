@@ -1,14 +1,13 @@
 // src/screens/Durak.tsx
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { socket } from "../lib/socket";
-import { bet as apiBet } from "../lib/api";
 import DurakSkin from "./DurakSkin";
 
 type Card = { rank: string; suit: string };
 type TablePair = { a: Card; d?: Card | null };
 const cn = (...a: (string | false | undefined)[]) => a.filter(Boolean).join(" ");
 
-// порядок рангов для сортировки руки (по возрастанию)
+// порядок рангов для базовой сортировки (по возрастанию)
 const RANKS = ["6", "7", "8", "9", "10", "J", "Q", "K", "A"];
 const RANK_POS: Record<string, number> = Object.fromEntries(RANKS.map((r, i) => [r, i]));
 const SUITS = ["♣", "♦", "♥", "♠"];
@@ -19,6 +18,26 @@ const sortHandAsc = (h: Card[]) =>
       (RANK_POS[a.rank] ?? 0) - (RANK_POS[b.rank] ?? 0) ||
       (SUIT_POS[a.suit] ?? 0) - (SUIT_POS[b.suit] ?? 0)
   );
+
+// умная сортировка: козыри всегда справа; у не-козырей — по массовости масти; внутри — 6..A
+function sortHandSmart(h: Card[], trumpSuit: string): Card[] {
+  const counts: Record<string, number> = { "♣": 0, "♦": 0, "♥": 0, "♠": 0 };
+  for (const c of h) counts[c.suit] = (counts[c.suit] || 0) + 1;
+
+  return [...h].sort((a, b) => {
+    const aT = Number(a.suit === trumpSuit);
+    const bT = Number(b.suit === trumpSuit);
+    if (aT !== bT) return aT - bT; // не-козыри слева, козыри справа
+
+    if (!aT && !bT) {
+      const ca = counts[a.suit] || 0;
+      const cb = counts[b.suit] || 0;
+      if (ca !== cb) return ca - cb;
+      if (a.suit !== b.suit) return (SUIT_POS[a.suit] ?? 0) - (SUIT_POS[b.suit] ?? 0);
+    }
+    return (RANK_POS[a.rank] ?? 0) - (RANK_POS[b.rank] ?? 0);
+  });
+}
 
 export default function DurakScreen({
   userId,
@@ -58,9 +77,12 @@ export default function DurakScreen({
   const meIsDefender = defender === userId;
   const oppPlayer =
     players.find((p) => p.userId !== userId) || { userId: "", handCount: 0 };
-  const oppTurn =
-    !!oppPlayer?.userId &&
-    (attacker === oppPlayer.userId || defender === oppPlayer.userId);
+
+  // Чей ход по состоянию стола
+  const needDef = table.some((p) => !p.d);
+  const whoseTurnUserId = needDef ? defender : attacker;
+  const myTurn = whoseTurnUserId === userId;
+  const oppTurn = !!oppPlayer?.userId && oppPlayer.userId !== userId ? !myTurn : false;
 
   /* Прячем нижнюю навигацию во время игры */
   useEffect(() => {
@@ -114,7 +136,7 @@ export default function DurakScreen({
       setSecondsLeft(null);
     }
     function onHand({ hand }: any) {
-      setHand(sortHandAsc(hand || []));
+      setHand(hand || []);
     }
     function onState(s: any) {
       setTrump(s.trump || "♠");
@@ -128,7 +150,7 @@ export default function DurakScreen({
       setDeadlineMs(s.deadline || null);
     }
     function onEnded({ winner, stake }: any) {
-      alert(winner === userId ? `Победа! +${stake + Math.floor(stake * 0.9)}` : "Поражение");
+      alert(winner === userId ? `Победа! +${stake * 2}` : "Поражение");
       setStep("menu");
       setLobbyId(null);
       setHand([]);
@@ -171,21 +193,17 @@ export default function DurakScreen({
     socket.emit("durak:list", { players: playersCount, stake });
   }
 
+  // (списание ставки на сервере при старте)
   async function join(l: any) {
     if (joining) return;
     try {
       setJoining(l.id);
-      const roundId = Math.random().toString(36).slice(2);
-      const res = await apiBet(userId, stake, roundId);
-      if (!res.success) { alert(res.message || "Недостаточно средств"); setJoining(null); return; }
-      setBalance(res.balance);
       socket.emit("durak:join", { lobbyId: l.id, userId });
     } finally { setJoining(null); }
   }
 
   function playByRules(c: Card, pairIndex: number | null) {
     if (!lobbyId) return;
-    // защита по индексу пары
     if (meIsDefender && pairIndex != null) {
       socket.emit("durak:move", {
         lobbyId,
@@ -195,14 +213,12 @@ export default function DurakScreen({
       });
       return;
     }
-    // атака / подкидать
     if (meIsAttacker) {
       const action = table.some((p) => p.d) ? "throw" : "attack";
       socket.emit("durak:move", { lobbyId, userId, action, payload: { card: c } });
     }
   }
 
-  // запасной клик (если кто-то всё ещё тапает, а не тянет)
   function onClickCard(c: Card) {
     if (!lobbyId) return;
     const emptyDefIndex = table.findIndex((p) => !p.d);
@@ -215,6 +231,10 @@ export default function DurakScreen({
 
   const take = () => lobbyId && socket.emit("durak:move", { lobbyId, userId, action: "take" });
   const bito = () => lobbyId && socket.emit("durak:move", { lobbyId, userId, action: "bito" });
+
+  // применяем сортировку с учётом козыря (козыри справа)
+  const trumpSuit = (trumpCard?.suit || trump);
+  const sortedHand = useMemo(() => sortHandSmart(hand, trumpSuit), [hand, trumpSuit]);
 
   return (
     <div className={cn("p-4", step === "game" && "touch-none")}>
@@ -292,9 +312,9 @@ export default function DurakScreen({
           deckCount={deckCount}
           discardCount={discardCount}
           table={table as any}
-          me={{ name: short(userId), avatarUrl: "", isTurn: true, balance }}
+          me={{ name: short(userId), avatarUrl: "", isTurn: myTurn, balance }}
           opp={{ name: short(oppPlayer.userId || ""), avatarUrl: "", isTurn: oppTurn, handCount: oppPlayer.handCount || 0 }}
-          hand={hand as any}
+          hand={sortedHand as any}
           canTake={canTakeBtn}
           canBito={canBitoBtn}
           stake={stake}

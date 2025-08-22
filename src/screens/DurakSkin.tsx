@@ -17,8 +17,8 @@ export default function DurakSkin({
   canBito,
   stake,
   secondsLeft,
-  onCardClick,
-  onDrop,            // <— новый колбэк: (card, pairIndex|null)
+  onCardClick, // не используем: сброс только перетаскиванием
+  onDrop,
   onTake,
   onBito,
   role,
@@ -45,16 +45,15 @@ export default function DurakSkin({
   const cardShadow =
     "0 14px 28px -16px rgba(0,0,0,.8), inset 0 0 0 1px rgba(0,0,0,.03)";
 
-  // подпись на кнопке
   const mainBtn = useMemo(() => {
     if (canTake) return { label: "Беру", kind: "take" as const, enabled: true };
     if (canBito) return { label: "Бито", kind: "bito" as const, enabled: true };
     return {
-      label: opp.isTurn ? "Ход соперника…" : "Ждём…",
+      label: me.isTurn ? "Ваш ход" : "Ход соперника…",
       kind: "none" as const,
       enabled: false,
     };
-  }, [canTake, canBito, opp.isTurn]);
+  }, [canTake, canBito, me.isTurn]);
 
   // таймер
   const total = 60;
@@ -64,14 +63,13 @@ export default function DurakSkin({
   // refs для дропа
   const tableAreaRef = useRef<HTMLDivElement>(null);
 
-  // вычисляем цель дропа по координатам
+  // цель дропа
   const getDropTarget = useCallback(
     (x: number, y: number): number | null => {
       const point = { x, y };
       const inside = (r: DOMRect) =>
         point.x >= r.left && point.x <= r.right && point.y >= r.top && point.y <= r.bottom;
 
-      // защита: искать незакрытые пары и проверять попадание в карту-атаку
       if (role === "defender") {
         const nodes = Array.from(
           document.querySelectorAll<HTMLElement>('[data-attack-slot="1"]')
@@ -79,18 +77,17 @@ export default function DurakSkin({
         for (const el of nodes) {
           const idx = Number(el.dataset.idx || "-1");
           if (Number.isNaN(idx)) continue;
-          if (table[idx]?.d) continue; // уже закрыто
+          if (table[idx]?.d) continue;
           const r = el.getBoundingClientRect();
           if (inside(r)) return idx;
         }
         return null;
       }
 
-      // атака/подкидывать: попасть в область стола
       if (role === "attacker") {
         const r = tableAreaRef.current?.getBoundingClientRect();
         if (r && inside(r)) return null; // null = просто на стол
-        return null; // мимо — отмена (вернём карту)
+        return null;
       }
 
       return null;
@@ -98,7 +95,7 @@ export default function DurakSkin({
     [role, table]
   );
 
-  // состояние драга (рендерим оверлей карты)
+  // drag-состояние (рендерим оверлей карты)
   const [drag, setDrag] = useState<{
     card: Card;
     idx: number;
@@ -115,11 +112,10 @@ export default function DurakSkin({
     setDrag((d) => {
       if (!d) return null;
       const target = getDropTarget(x, y);
-      // defender: target = индекс пары; attacker: target === null => просто стол
       if ((role === "defender" && target != null) || (role === "attacker" && target === null)) {
         onDrop(d.card, target);
       }
-      return null; // оверлей убираем (если ход невалиден — просто вернётся исходная карта)
+      return null;
     });
   };
 
@@ -134,11 +130,12 @@ export default function DurakSkin({
           boxShadow: "inset 0 0 160px rgba(0,0,0,.35)",
         }}
       >
-        {/* Верх */}
+        {/* Верхняя панель */}
         <div className="absolute left-4 top-3 right-4 flex items-start justify-between pointer-events-none select-none">
           <div className="text-white/80 text-sm">
             <div className="flex items-center gap-3">
               <div className="text-white/90">сброс: <b>{discardCount}</b></div>
+              <div className="text-white/80">соперник: <b>{Math.max(0, opp.handCount || 0)}</b></div>
               <div className="relative w-9 h-9 ml-1">
                 <svg width="36" height="36" viewBox="0 0 40 40">
                   <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,.12)" strokeWidth="3" fill="none" />
@@ -157,7 +154,7 @@ export default function DurakSkin({
             </div>
           </div>
 
-          {/* Колода/козырь */}
+          {/* Колода/козырь/ставка */}
           <div className="relative flex items-center gap-2">
             <div className="relative">
               <div
@@ -196,7 +193,7 @@ export default function DurakSkin({
           </div>
         </div>
 
-        {/* Центр: стол (даём ref и data-атрибуты для дропа) */}
+        {/* Центр: стол */}
         <div ref={tableAreaRef} className="absolute inset-x-4 top-20 bottom-[170px]">
           <TableView table={table} suitColor={suitColor} cardShadow={cardShadow} />
         </div>
@@ -204,7 +201,6 @@ export default function DurakSkin({
         {/* Рука */}
         <HandFan
           hand={hand}
-          onCardClick={onCardClick}
           suitColor={suitColor}
           cardShadow={cardShadow}
           draggingIndex={drag?.idx ?? null}
@@ -233,19 +229,19 @@ export default function DurakSkin({
         </div>
       </div>
 
-      {/* Оверлей перетаскиваемой карты */}
+      {/* Оверлей перетаскиваемой карты — полностью непрозрачный */}
       {drag && (
         <div className="pointer-events-none fixed inset-0 z-[999]">
           <div
             className="absolute"
             style={{
-              left: drag.x - 40,  // центрируем примерно под палец/курсор
+              left: drag.x - 40,
               top: drag.y - 56,
               transform: "rotate(0deg) scale(1.12)",
               transition: "transform 60ms linear",
             }}
           >
-            <CardView c={drag.card} suitColor={suitColor} cardShadow={cardShadow} alpha={0.95} />
+            <CardView c={drag.card} suitColor={suitColor} cardShadow={cardShadow} alpha={1} />
           </div>
         </div>
       )}
@@ -253,11 +249,10 @@ export default function DurakSkin({
   );
 }
 
-/* =================== Hand (веер + hover/drag) =================== */
+/* =================== Hand (веер + hover; drag стартует только при движении ВВЕРХ) =================== */
 
 function HandFan({
   hand,
-  onCardClick,
   suitColor,
   cardShadow,
   draggingIndex,
@@ -266,7 +261,6 @@ function HandFan({
   onDragEnd,
 }: {
   hand: Card[];
-  onCardClick: (c: Card) => void;
   suitColor: (s: Suit) => string;
   cardShadow: string;
   draggingIndex: number | null;
@@ -275,12 +269,34 @@ function HandFan({
   onDragEnd: (x: number, y: number) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
-  const [focusIdx, setFocusIdx] = useState<number | null>(null);
 
-  const geom = useMemo(() => {
-    const n = Math.max(1, hand.length);
-    const flat = n <= 5;
-    if (flat) {
+  // ховер-индекс (для увеличения/подсветки при свайпе влево/вправо)
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  // состояние “нажатия” (но без начала drag до порога по вертикали)
+  const pressRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    idx: number;
+    card: Card;
+    dragging: boolean;
+  } | null>(null);
+
+  const n = hand.length;
+
+  // карта по X
+  function indexFromClientX(clientX: number) {
+    const el = wrapRef.current; if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const x = Math.max(0, Math.min(r.width, clientX - r.left));
+    if (n <= 1) return 0;
+    return Math.max(0, Math.min(n - 1, Math.round(((n - 1) * x) / r.width)));
+  }
+
+  // базовая геометрия веера (чуть шире, чтобы читались масти)
+  const baseGeom = useMemo(() => {
+    if (n <= 3) {
       const gap = 92;
       const start = -((n - 1) / 2) * gap;
       return hand.map((_, i) => ({ baseRot: 0, baseX: start + i * gap, baseY: 0 }));
@@ -288,72 +304,137 @@ function HandFan({
     const spreadDeg = Math.min(92, 18 + 4 * n);
     const startDeg = -spreadDeg / 2;
     const stepDeg = n > 1 ? spreadDeg / (n - 1) : 0;
-    const baseStepX = 44;
-    const stepX = Math.max(30, baseStepX - Math.max(0, n - 8) * 2);
+    const baseStepX = 48;
+    const stepX = Math.max(26, baseStepX - Math.max(0, n - 8) * 3);
     return hand.map((_, i) => {
       const rot = startDeg + i * stepDeg;
       return { baseRot: rot, baseX: (i - (n - 1) / 2) * stepX, baseY: Math.abs(rot) * 0.8 };
     });
-  }, [hand]);
+  }, [hand, n]);
 
-  function indexFromClientX(clientX: number) {
-    const el = wrapRef.current; if (!el) return null;
-    const r = el.getBoundingClientRect();
-    const x = Math.max(0, Math.min(r.width, clientX - r.left));
-    if (hand.length <= 1) return 0;
-    return Math.max(0, Math.min(hand.length - 1, Math.round(((hand.length - 1) * x) / r.width)));
-  }
-  const onMove = (clientX: number) => setFocusIdx(indexFromClientX(clientX));
+  // порог, после которого начинаем drag (движение ВВЕРХ)
+  const DRAG_START_DY = -24; // нужно уйти вверх минимум на 24px
 
-  // pointer events для drag
-  const pointerMove = (e: PointerEvent) => onDragMove(e.clientX, e.clientY);
-  const pointerUp = (e: PointerEvent) => {
-    onDragEnd(e.clientX, e.clientY);
-    window.removeEventListener("pointermove", pointerMove);
-    window.removeEventListener("pointerup", pointerUp, true);
-  };
+  // window-pointermove: управляем hover и, при необходимости, drag
+  const onWinMove = useCallback((e: PointerEvent) => {
+    const pr = pressRef.current;
 
+    // всегда обновляем hover по X (для подсветки под пальцем)
+    const idxUnderFinger = indexFromClientX(e.clientX);
+    if (idxUnderFinger != null) setHoverIdx(idxUnderFinger);
+
+    if (!pr) return;
+    const dy = e.clientY - pr.startY;
+
+    // если drag ещё не начался — ждём движения ВВЕРХ
+    if (!pr.dragging) {
+      if (dy <= DRAG_START_DY) {
+        // ВАЖНО: берём карту под пальцем В МОМЕНТ старта drag
+        const idxNow = idxUnderFinger ?? pr.idx;
+        const cardNow = hand[idxNow] ?? pr.card;
+
+        pressRef.current = { ...pr, idx: idxNow, card: cardNow, dragging: true };
+        onDragStart(idxNow, cardNow, e.clientX, e.clientY);
+      }
+      return;
+    }
+
+    // drag активен — двигаем оверлей
+    onDragMove(e.clientX, e.clientY);
+  }, [onDragMove, hand]);
+
+  const onWinUp = useCallback((e: PointerEvent) => {
+    const pr = pressRef.current;
+    window.removeEventListener("pointermove", onWinMove);
+    window.removeEventListener("pointerup", onWinUp, true);
+    if (pr?.dragging) {
+      onDragEnd(e.clientX, e.clientY);
+    }
+    pressRef.current = null;
+  }, [onDragEnd, onWinMove]);
+
+  // pointerdown по конкретной карте — но drag пока НЕ запускаем
   const handlePointerDown = (i: number, c: Card) => (e: React.PointerEvent) => {
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    onDragStart(i, c, e.clientX, e.clientY);
-    window.addEventListener("pointermove", pointerMove);
-    window.addEventListener("pointerup", pointerUp, true);
+    pressRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      idx: i,
+      card: c,
+      dragging: false,
+    };
+    setHoverIdx(i); // сразу подсветим эту карту
+    window.addEventListener("pointermove", onWinMove);
+    window.addEventListener("pointerup", onWinUp, true);
   };
 
+  // ховер-эффект (для мыши/не зажатого пальца)
+  const onMove = (clientX: number) => {
+    // если палец зажат — hover обновляется в onWinMove
+    if (pressRef.current?.dragging || pressRef.current) return;
+    const idx = indexFromClientX(clientX);
+    if (idx != null) setHoverIdx(idx);
+  };
+
+  // стиль карты с учётом hover + “расхождения” при активном drag
+  function cardStyle(i: number) {
+    const g = baseGeom[i];
+
+    const d = hoverIdx == null ? 99 : Math.abs(i - (hoverIdx as number));
+    const scale = hoverIdx == null ? 1 : d === 0 ? 1.14 : d === 1 ? 1.07 : d === 2 ? 1.03 : 1;
+    const lift = hoverIdx == null ? 0 : d === 0 ? 18 : d === 1 ? 10 : d === 2 ? 6 : 0;
+    const spread = hoverIdx == null ? 0 : (i - (hoverIdx as number)) * (d === 0 ? 0 : d === 1 ? 12 : d === 2 ? 6 : 0);
+
+    // соседи расходятся, если какая-то карта перетаскивается
+    let pushApart = 0;
+    if (draggingIndex != null) {
+      const dist = Math.abs(i - draggingIndex);
+      if (dist > 0) {
+        const dir = i < draggingIndex ? -1 : 1;
+        const magnitude = Math.max(0, 16 - (dist - 1) * 6); // 16, 10, 4, 0...
+        pushApart = dir * magnitude;
+      }
+    }
+
+    return {
+      transform: `translateX(-50%) translateX(${g.baseX + spread + pushApart}px) translateY(${g.baseY - lift}px) rotate(${g.baseRot}deg) scale(${scale})`,
+      zIndex: 10 + (hoverIdx == null ? i : 100 - d * 10),
+      hidden: false,
+    };
+  }
+
   return (
-    <div className="pointer-events-none" style={{ position: "absolute", left: 0, right: 0, bottom: "calc(84px + env(safe-area-inset-bottom) + 56px)", height: 200 }}>
+    <div
+      className="pointer-events-none"
+      style={{ position: "absolute", left: 0, right: 0, bottom: "calc(84px + env(safe-area-inset-bottom) + 56px)", height: 200 }}
+    >
       <div
         ref={wrapRef}
         className="relative mx-auto w-full max-w-[96%] h-full"
         onMouseMove={(e) => onMove(e.clientX)}
-        onMouseLeave={() => setFocusIdx(null)}
+        onMouseLeave={() => setHoverIdx(null)}
         onTouchStart={(e) => onMove(e.touches[0].clientX)}
         onTouchMove={(e) => onMove(e.touches[0].clientX)}
-        onTouchEnd={() => setFocusIdx(null)}
+        onTouchEnd={() => setHoverIdx(null)}
       >
         {hand.map((c, i) => {
-          const g = geom[i];
-          const d = focusIdx == null ? 99 : Math.abs(i - (focusIdx as number));
-          const scale = focusIdx == null ? 1 : d === 0 ? 1.14 : d === 1 ? 1.07 : d === 2 ? 1.03 : 1;
-          const lift = focusIdx == null ? 0 : d === 0 ? 18 : d === 1 ? 10 : d === 2 ? 6 : 0;
-          const spread = focusIdx == null ? 0 : (i - (focusIdx as number)) * (d === 0 ? 0 : d === 1 ? 12 : d === 2 ? 6 : 0);
-          const z = 10 + (focusIdx == null ? i : 100 - d * 10);
-
+          const st = cardStyle(i);
           return (
             <button
               key={i}
               className="absolute left-1/2 pointer-events-auto"
               style={{
                 bottom: 0,
-                transform: `translateX(-50%) translateX(${g.baseX + spread}px) translateY(${g.baseY - lift}px) rotate(${g.baseRot}deg) scale(${scale})`,
+                transform: st.transform,
                 transition: "transform 140ms ease, box-shadow 140ms ease, filter 140ms ease, opacity 140ms ease",
-                zIndex: z,
-                opacity: draggingIndex === i ? 0 : 1, // прячем оригинал во время драга
+                zIndex: st.zIndex,
+                opacity: draggingIndex === i ? 0 : 1, // карта в руке полностью непрозрачная
               }}
               onPointerDown={handlePointerDown(i, c)}
-              onClick={() => onCardClick(c)} // запасной тап
             >
-              <CardView c={c} suitColor={suitColor} cardShadow={cardShadow} alpha={0.9} />
+              {/* карты белые/непрозрачные */}
+              <CardView c={c} suitColor={suitColor} cardShadow={cardShadow} alpha={1} />
             </button>
           );
         })}
@@ -381,11 +462,12 @@ function CardView({
       className="w-[72px] h-[104px] sm:w-[80px] sm:h-[116px] rounded-2xl grid"
       style={{
         gridTemplateRows: "1fr auto 1fr",
-        background: "linear-gradient(180deg, rgba(255,255,255,.96), rgba(244,246,250,.92))",
+        // полностью непрозрачная “белая” карта
+        background: "linear-gradient(180deg, rgba(255,255,255,1), rgba(244,246,250,1))",
         border: "1px solid rgba(0,0,0,.06)",
         boxShadow: cardShadow,
         willChange: "transform",
-        opacity: alpha,
+        opacity: alpha, // в руке и оверлее мы передаём alpha={1}
       }}
     >
       <div className="p-2 text-xs font-semibold" style={{ color: suitColor(c.suit) }}>
@@ -422,7 +504,7 @@ function TableView({
     );
   }
 
-  // пары в 2 ряда по центру; каждому "атакующему" даём data-атрибут для попадания дропа
+  // пары в 2 ряда по центру
   return (
     <div className="w-full h-full grid place-items-center">
       <div className="relative w-[92%] max-w-[520px] min-h-[160px]">

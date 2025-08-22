@@ -27,8 +27,8 @@ const io = new IOServer(server, {
 const DATA_DIR = path.join(process.cwd(), "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 const balancesPath = path.join(DATA_DIR, "balances.json");
-const historyPath  = path.join(DATA_DIR, "history.json");
-const refsPath     = path.join(DATA_DIR, "refs.json");
+const historyPath = path.join(DATA_DIR, "history.json");
+const refsPath = path.join(DATA_DIR, "refs.json");
 
 function readJSON(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
@@ -156,7 +156,6 @@ function makeRefCode(userId) {
 app.post("/reflink", (req, res) => {
   const { userId } = req.body || {};
   if (!userId) return res.status(400).json({ ok: false, error: "no userId" });
-  // выдаём (или создаём) код
   let code = Object.entries(refs.codes).find(([, uid]) => uid === userId)?.[0];
   if (!code) {
     code = makeRefCode(userId);
@@ -180,9 +179,7 @@ app.post("/apply-ref", (req, res) => {
 });
 
 /* ===================== Blackjack PvP (server-driven) ===================== */
-/** Очереди по ставкам */
 const bjQueues = new Map(); // stake -> [socketId]
-/** Игры по roomId */
 const bjRooms = new Map();  // roomId -> GameState
 
 function bjJoinQueue(sock, stake) {
@@ -227,31 +224,23 @@ function bjScore(hand){ return handValue(hand); }
 function bjBroadcastState(gs) {
   const [a,b] = gs.order;
   const A = gs.players[a], B = gs.players[b];
-
-  // Персональные state — каждому отправляем свой "you" с полной рукой,
-  // а "opp" — с полной рукой, НО клиент сам скрывает отображение до конца.
   function pack(p){ return { hand: p.hand, stood: p.stood, score: bjScore(p.hand) }; }
-
   io.to(a).emit("state", { roomId: gs.id, stake: gs.stake, you: pack(A), opp: pack(B), deadline: gs.deadline });
   io.to(b).emit("state", { roomId: gs.id, stake: gs.stake, you: pack(B), opp: pack(A), deadline: gs.deadline });
 }
 
 function bjFinish(gs){
   if (gs.finished) return;
-
   const [a,b] = gs.order;
   const A = gs.players[a], B = gs.players[b];
   const sa = bjScore(A.hand), sb = bjScore(B.hand);
-
   let resA = "push", resB = "push";
   if (sa>21 && sb>21) { resA="push"; resB="push"; }
   else if (sa>21) { resA="lose"; resB="win"; }
   else if (sb>21) { resA="win"; resB="lose"; }
   else if (sa>sb) { resA="win"; resB="lose"; }
   else if (sa<sb) { resA="lose"; resB="win"; }
-  else { resA="push"; resB="push"; }
 
-  // Выплаты: win -> 1.9x своей ставки; push -> возврат ставки
   const stake = gs.stake;
   const creditWin = stake + Math.floor(stake*0.9);
   const creditPush = stake;
@@ -272,11 +261,9 @@ function bjFinish(gs){
   settle(uidA, resA); settle(uidB, resB);
   writeJSON(balancesPath, balances);
 
-  // история
   history.unshift({ type:"bj_pvp_result", roomId: gs.id, stake, A:{uid:uidA,score:sa,res:resA}, B:{uid:uidB,score:sb,res:resB}, ts: Date.now() });
   writeJSON(historyPath, history.slice(0,1000));
 
-  // Сообщаем результат
   io.to(a).emit("result", { roomId: gs.id, result: resA, you: sa, opp: sb });
   io.to(b).emit("result", { roomId: gs.id, result: resB, you: sb, opp: sa });
 
@@ -284,7 +271,6 @@ function bjFinish(gs){
 }
 
 io.on("connection", (socket) => {
-  /* ---- handshake ---- */
   socket.on("hello", ({ userId }) => { socket.data.userId = userId; });
 
   /* ---- Blackjack matchmaking ---- */
@@ -292,7 +278,6 @@ io.on("connection", (socket) => {
     bjJoinQueue(socket, Number(stake) || 10);
   });
 
-  // ready: как только оба готовы — сдаём и шлём state
   socket.on("ready", ({ roomId }) => {
     const gs = bjRooms.get(roomId);
     if (!gs || gs.finished) return;
@@ -306,7 +291,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Ходы в BJ: { roomId, action: 'hit'|'stand' }
   socket.on("move", ({ roomId, action }) => {
     const gs = bjRooms.get(roomId);
     if (!gs || gs.finished) return;
@@ -315,12 +299,11 @@ io.on("connection", (socket) => {
     if (!p) return;
 
     if (Date.now() > gs.deadline) {
-      // таймаут = авто-stand для того, кто не походил
       p.stood = true;
     } else if (action === "hit" && !p.stood) {
       const card = gs.deck.pop();
       if (card) p.hand.push(card);
-      if (bjScore(p.hand) > 21) p.stood = true; // перебор = автоконец для этого игрока
+      if (bjScore(p.hand) > 21) p.stood = true;
       gs.deadline = Date.now() + 30_000;
     } else if (action === "stand") {
       p.stood = true;
@@ -329,8 +312,6 @@ io.on("connection", (socket) => {
 
     const [a,b] = gs.order;
     const A = gs.players[a], B = gs.players[b];
-
-    // если оба закончили — финал
     if (A.stood && B.stood) {
       bjFinish(gs);
     } else {
@@ -340,13 +321,11 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     bjLeaveAllQueues(socket.id);
-    // Если игрок вылетел из активной комнаты — второй победил
     for (const [rid, gs] of bjRooms) {
       if (gs.finished) continue;
       if (gs.players[socket.id]) {
         const otherSid = gs.order.find(x=>x!==socket.id);
         if (otherSid && gs.players[otherSid]) {
-          // победа второму
           const winnerId = gs.players[otherSid].userId;
           balances[winnerId] ??= { balance: 500, wins: 0, profit: 0 };
           const credit = gs.stake + Math.floor(gs.stake*0.9);
@@ -363,7 +342,6 @@ io.on("connection", (socket) => {
 });
 
 /* ===================== Durak 2×2 (встроенный) ===================== */
-/* 36-картная колода, подкидной, 2 игрока — MVP. Лобби на фикс. ставки. */
 (function attachDurak(io, ctx){
   const { balances, history, writeJSON } = ctx;
 
@@ -371,6 +349,9 @@ io.on("connection", (socket) => {
   const RANKS = ["6","7","8","9","10","J","Q","K","A"];
   const RANK_ORDER = Object.fromEntries(RANKS.map((r,i)=>[r,i]));
   const POP_STAKES = [10,25,50,100,250,500];
+
+  // лимит пар на столе: не более 5, и не больше карт у защитника
+  const MAX_PAIRS = 5;
 
   function makeDeck36(){
     const d = []; for (const s of SUITS) for (const r of RANKS) d.push({rank:r,suit:s});
@@ -390,10 +371,10 @@ io.on("connection", (socket) => {
   const now = ()=>Date.now();
   const serialize = h => h.map(c=>({rank:c.rank,suit:c.suit}));
 
-  const LOBBIES = new Map(); // id -> { id, stake, capacity:2, players:[{userId,socketId}], game }
+  const LOBBIES = new Map(); // id -> { id, title, stake, capacity:2, players:[{userId,socketId}], game }
   const PLAYER_LOBBY = new Map(); // socketId -> lobbyId
 
-  // создаём 5 лобби на каждую популярную ставку
+  // 5 лобби на каждую популярную ставку
   for (const stake of POP_STAKES){
     for (let i=1;i<=5;i++){
       const id = `D2-${stake}-${i}`;
@@ -403,7 +384,28 @@ io.on("connection", (socket) => {
 
   function roomName(lobbyId){ return "durak-"+lobbyId; }
 
+  // списание ставки с обоих перед стартом; если не хватает — не стартуем
+  function chargeBothOrAbort(L){
+    for (const p of L.players){
+      const u = p.userId;
+      balances[u] ??= { balance:500, wins:0, profit:0 };
+      if (balances[u].balance < L.stake){
+        io.to(p.socketId).emit("durak:error",{ message:"Недостаточно средств для ставки" });
+        return false;
+      }
+    }
+    for (const p of L.players){
+      const u = p.userId;
+      balances[u].balance -= L.stake;
+      balances[u].profit  -= L.stake;
+    }
+    writeJSON(balancesPath, balances);
+    return true;
+  }
+
   function startGame(L){
+    if (!chargeBothOrAbort(L)) return;
+
     const deck = makeDeck36();
     const trumpCard = deck[deck.length-1];
     const trump = trumpCard.suit;
@@ -428,6 +430,7 @@ io.on("connection", (socket) => {
     }
     broadcast(L);
   }
+
   function broadcast(L){
     const G = L.game; if (!G) return;
     io.to(roomName(L.id)).emit("durak:state", {
@@ -440,6 +443,7 @@ io.on("connection", (socket) => {
       deadline: G.deadline
     });
   }
+
   function refill(L){
     const G = L.game;
     const order = [G.attacker, G.defender];
@@ -447,6 +451,7 @@ io.on("connection", (socket) => {
       while (G.hands[u].length<6 && G.deck.length>0) G.hands[u].push(G.deck.pop());
     }
   }
+
   function endTurn_Bito(L){
     const G = L.game;
     G.discardCount += G.table.length*2; G.table = [];
@@ -454,14 +459,15 @@ io.on("connection", (socket) => {
     const prevAtt = G.attacker; G.attacker = G.defender; G.defender = prevAtt;
     G.deadline = now()+60_000;
   }
+
   function defenderTakes(L){
     const G = L.game;
     for (const pair of G.table){ G.hands[G.defender].push(pair.a); if (pair.d) G.hands[G.defender].push(pair.d); }
     G.table = [];
     refill(L);
-    // атакующий остаётся тем же
     G.deadline = now()+60_000;
   }
+
   function tryFinish(L){
     const G = L.game;
     if (!G) return false;
@@ -477,16 +483,51 @@ io.on("connection", (socket) => {
     io.to(roomName(L.id)).emit("durak:ended", { winner, loser, stake:G.stake });
     return true;
   }
+
+  // выплата победителю = 2 * stake
   function settle(L, winner, loser){
-    const add = L.stake + Math.floor(L.stake*0.9);
+    const prize = 2 * L.stake;
     balances[winner] ??= { balance:500, wins:0, profit:0 };
-    balances[winner].balance += add;
+    balances[winner].balance += prize;
     balances[winner].wins += 1;
-    balances[winner].profit += add;
+    balances[winner].profit += prize;
     writeJSON(balancesPath, balances);
-    history.unshift({ type:"durak_win", lobbyId:L.id, stake:L.stake, winner, loser, amount:add, ts: now() });
+    history.unshift({ type:"durak_win", lobbyId:L.id, stake:L.stake, winner, loser, amount:prize, ts: now() });
     writeJSON(historyPath, history.slice(0,1000));
   }
+
+  function turnOwner(L){
+    const G = L.game; if (!G) return null;
+    const needDef = G.table.some(p => !p.d);
+    return needDef ? G.defender : G.attacker;
+  }
+
+  // WATCHDOG: дедлайны и победа по таймауту
+  setInterval(() => {
+    const t = Date.now();
+    for (const L of LOBBIES.values()){
+      const G = L.game;
+      if (!G || G.finished || !G.deadline) continue;
+      if (t <= G.deadline) continue;
+
+      const loser = turnOwner(L);
+      const winner = L.players.find(p=>p.userId!==loser)?.userId;
+      if (!winner || !loser) continue;
+
+      const prize = 2 * L.stake;
+      balances[winner] ??= { balance:500, wins:0, profit:0 };
+      balances[winner].balance += prize;
+      balances[winner].wins += 1;
+      balances[winner].profit += prize;
+      writeJSON(balancesPath, balances);
+
+      history.unshift({ type:"durak_timeout", lobbyId:L.id, winner, loser, stake:L.stake, ts:t });
+      writeJSON(historyPath, history.slice(0,1000));
+
+      G.finished = true;
+      io.to(roomName(L.id)).emit("durak:ended", { winner, loser, stake:L.stake, reason:"timeout" });
+    }
+  }, 1000);
 
   io.on("connection", (socket)=>{
     socket.on("durak:list", ({players, stake})=>{
@@ -529,7 +570,10 @@ io.on("connection", (socket) => {
       if (now()>G.deadline){
         const loser = userId;
         const winner = L.players.find(p=>p.userId!==loser)?.userId;
-        if (winner){ settle(L, winner, loser); io.to(roomName(L.id)).emit("durak:ended", { winner, loser, stake:G.stake, reason:"timeout" }); }
+        if (winner){
+          settle(L, winner, loser);
+          io.to(roomName(L.id)).emit("durak:ended", { winner, loser, stake:G.stake, reason:"timeout" });
+        }
         G.finished = true; return;
       }
       if (G.finished) return;
@@ -538,7 +582,7 @@ io.on("connection", (socket) => {
         if (userId!==G.attacker) return;
         const card = payload?.card; if (!card) return;
         const has = G.hands[userId].find(c=>c.rank===card.rank && c.suit===card.suit); if (!has) return;
-        const defenderMax = Math.min(6, G.hands[G.defender].length);
+        const defenderMax = Math.min(MAX_PAIRS, G.hands[G.defender].length);
         if (G.table.length>=defenderMax) return;
         if (!sameRankAllowed(card, G.table)) return;
         G.hands[userId] = G.hands[userId].filter(c=>!(c.rank===card.rank && c.suit===card.suit));
@@ -559,7 +603,7 @@ io.on("connection", (socket) => {
         if (userId!==G.attacker) return;
         const card = payload?.card; if (!card) return;
         const has = G.hands[userId].find(c=>c.rank===card.rank && c.suit===card.suit); if (!has) return;
-        const defenderMax = Math.min(6, G.hands[G.defender].length);
+        const defenderMax = Math.min(MAX_PAIRS, G.hands[G.defender].length);
         if (G.table.length>=defenderMax) return;
         if (!sameRankAllowed(card, G.table)) return;
         G.hands[userId] = G.hands[userId].filter(c=>!(c.rank===card.rank && c.suit===card.suit));
